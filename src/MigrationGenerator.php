@@ -80,7 +80,7 @@ PHP;
         $sql = '';
 
         foreach ($entities as $ref) {
-            $table = strtolower($ref->getShortName()) . 's';
+            $table = strtolower($ref->getShortName());
 
             // 1) Table doesn’t exist → full CREATE
             if (!isset($schema[$table])) {
