@@ -122,7 +122,10 @@ SQL;
     }
 
     /**
-     * @return array<string,string>  colName => full SQL fragment (e.g. "`name` VARCHAR(255) NOT NULL")
+     * Extract column definitions from the entity's properties.
+     *
+     * @param ReflectionClass $ref The entity class reflection
+     * @return array              Associative array of column definitions
      */
     private function getColumnDefinitions(ReflectionClass $ref): array
     {
@@ -131,7 +134,15 @@ SQL;
         foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
             $name = $prop->getName();
 
-            // Map PHP type to SQL
+            // ─── AUTO_INCREMENT primary key ───────────────────────────────
+            if ($name === 'id') {
+                // Always emit the id as INT NOT NULL AUTO_INCREMENT
+                $defs[$name] = "`id` INT NOT NULL AUTO_INCREMENT";
+                continue;
+            }
+
+            // ─── the rest of your column-building logic ───────────────────
+            // Map PHP type → SQL, apply ColumnAttr overrides, etc.
             $type    = $prop->getType()?->getName() ?? 'string';
             $sqlType = match (strtolower($type)) {
                 'int','integer'           => 'INT',
@@ -143,14 +154,14 @@ SQL;
                 default                   => 'VARCHAR(255)',
             };
 
-            // Override via #[Column] attribute?
+            // override via #[Column]
             $colAttrs = $prop->getAttributes(ColumnAttr::class);
             if ($colAttrs) {
                 /** @var ColumnAttr $attr */
                 $attr     = $colAttrs[0]->newInstance();
-                $sqlType  = strtoupper($attr->type ?? $sqlType);
-                $length   = $attr->length ? "({$attr->length})" : '';
-                $nullable = $attr->nullable ? ' NULL' : ' NOT NULL';
+                $sqlType  = strtoupper($attr->type   ?? $sqlType);
+                $length   = $attr->length            ? "({$attr->length})" : '';
+                $nullable = $attr->nullable          ? ' NULL' : ' NOT NULL';
                 $defs[$name] = "`{$name}` {$sqlType}{$length}{$nullable}";
                 continue;
             }
