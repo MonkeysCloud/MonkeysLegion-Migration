@@ -102,6 +102,13 @@ PHP;
         return trim($sql);
     }
 
+    /**
+     * Generate the SQL to create a new table based on the entity's properties.
+     *
+     * @param ReflectionClass $ref   The entity class reflection
+     * @param string          $table The name of the table to create
+     * @return string               The SQL CREATE TABLE statement
+     */
     private function createTableSql(ReflectionClass $ref, string $table): string
     {
         $cols = $this->getColumnDefinitions($ref);
@@ -110,7 +117,7 @@ PHP;
 CREATE TABLE `{$table}` (
   {$defs},
   PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL;
     }
 
