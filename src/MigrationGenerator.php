@@ -5,44 +5,37 @@ namespace MonkeysLegion\Migration;
 
 use DateTimeImmutable;
 use MonkeysLegion\Database\MySQL\Connection;
+use MonkeysLegion\Entity\Attributes\Column as ColumnAttr;
+use MonkeysLegion\Entity\Attributes\Field as FieldAttr;
+use MonkeysLegion\Entity\Attributes\JoinTable;
+use MonkeysLegion\Entity\Attributes\ManyToMany;
 use ReflectionClass;
 use ReflectionProperty;
-use MonkeysLegion\Entity\Attributes\Column as ColumnAttr;
 
 final class MigrationGenerator
 {
     public function __construct(private Connection $db) {}
 
     /**
-     * Generate a migration class file under var/migrations/.
-     *
-     * @param ReflectionClass[] $entities Array of entity ReflectionClasses
-     * @param array             $schema   Current DB schema [table => [col=>def]]
-     * @param string            $name     Optional name suffix (e.g. 'create_users_table')
-     * @return string                     Full path to the created PHP file
+     * Generate a migration PHP file under var/migrations/.
      */
     public function generate(array $entities, array $schema, string $name = 'migration'): string
     {
-        // 1) Compose the UP SQL from your diff()
-        $sqlUp = trim($this->diff($entities, $schema));
-
-        // 2) Auto-reverse it for DOWN
+        $sqlUp   = trim($this->diff($entities, $schema));
         $sqlDown = $this->autoReverse($sqlUp);
 
-        // 3) Build class & file name
-        $ts    = (new DateTimeImmutable())->format('YmdHis');
-        $slug  = preg_replace('/[^A-Za-z0-9]+/', '_', $name);
-        $class = "M{$ts}" . ucfirst($slug);
-        $file  = base_path("var/migrations/{$class}.php");
+        $ts     = (new DateTimeImmutable())->format('YmdHis');
+        $slug   = preg_replace('/[^A-Za-z0-9]+/', '_', $name);
+        $class  = "M{$ts}" . ucfirst($slug);
+        $file   = base_path("var/migrations/{$class}.php");
 
-        // 4) Render the migration stub
         $template = <<<PHP
 <?php
 declare(strict_types=1);
 
-namespace App\\Migration;
+namespace App\Migration;
 
-use MonkeysLegion\\Database\\MySQL\\Connection;
+use MonkeysLegion\Database\MySQL\Connection;
 
 final class {$class}
 {
@@ -69,45 +62,106 @@ PHP;
     }
 
     /**
-     * Compute the SQL needed to bring the DB *up* to match your entities.
-     *
-     * @param ReflectionClass[] $entities
-     * @param array             $schema   [table => [column => definition]]
-     * @return string
+     * Compute SQL to migrate current DB schema to match entity metadata.
+     * Returns a complete SQL string ending with a semicolon.
      */
     public function diff(array $entities, array $schema): string
     {
-        $sql = '';
+        $alterStmts     = [];
+        $joinTableStmts = [];
 
-        foreach ($entities as $ref) {
+        foreach ($entities as $entityFqcn) {
+            $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
             $table = strtolower($ref->getShortName());
 
-            // 1) Table doesn’t exist → full CREATE
+            /* 1️⃣  Table doesn’t exist → full CREATE */
             if (!isset($schema[$table])) {
-                $sql .= $this->createTableSql($ref, $table) . "\n\n";
-                continue;
+                $alterStmts[] = $this->createTableSql($ref, $table);
+                // still gather join tables so foreign keys reference existing tables later
             }
 
-            // 2) Table exists → add new columns
-            $existingCols = array_keys($schema[$table]);
-            foreach ($this->getColumnDefinitions($ref) as $colName => $colDef) {
-                if (!in_array($colName, $existingCols, true)) {
-                    $sql .= "ALTER TABLE `{$table}` ADD COLUMN {$colDef};\n";
+            $existingCols = array_keys($schema[$table] ?? []);
+            $skipCols     = []; // columns to ignore because they represent ManyToMany relations
+
+            foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+
+                /* ─── Many-to-Many detection ────────────────────────── */
+                foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
+                    /** @var ManyToMany $meta */
+                    $meta = $attr->newInstance();
+
+                    // Owning side = has joinTable metadata
+                    if ($meta->joinTable instanceof JoinTable) {
+                        $jt = $meta->joinTable;
+                        $joinTableStmts[$jt->name] = <<<SQL
+CREATE TABLE IF NOT EXISTS `{$jt->name}` (
+    `{$jt->joinColumn}` INT NOT NULL,
+    `{$jt->inverseColumn}` INT NOT NULL,
+    PRIMARY KEY (`{$jt->joinColumn}`, `{$jt->inverseColumn}`),
+    FOREIGN KEY (`{$jt->joinColumn}`)   REFERENCES `{$table}`(`id`)   ON DELETE CASCADE,
+    FOREIGN KEY (`{$jt->inverseColumn}`) REFERENCES `{$this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '')}`(`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SQL;
+                    }
+                    // mark property so we don't add a column for it
+                    $skipCols[] = $prop->getName();
+                }
+
+                /* ─── Scalar / Field columns ───────────────────────── */
+                foreach ($prop->getAttributes(FieldAttr::class) as $attr) {
+                    $field = $attr->newInstance();
+                    $col   = $prop->getName();
+                    if (in_array($col, $skipCols, true)) {
+                        continue; // relation property – skip
+                    }
+                    if (!in_array($col, $existingCols, true)) {
+                        $type = $this->mapToSql($field->type ?? 'string', $field->length ?? null);
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$col}` {$type}";
+                    }
+                }
+
+                /* ─── Column overrides via #[Column] ──────────────── */
+                if ($prop->getAttributes(ColumnAttr::class)) {
+                    $attr = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
+                    $col  = $prop->getName();
+                    if (in_array($col, $skipCols, true)) {
+                        continue;
+                    }
+                    if (!in_array($col, $existingCols, true)) {
+                        $sqlType = strtoupper($attr->type ?? 'VARCHAR(255)');
+                        $length  = $attr->length ? "({$attr->length})" : '';
+                        $null    = $attr->nullable ? ' NULL' : ' NOT NULL';
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$col}` {$sqlType}{$length}{$null}";
+                    }
                 }
             }
-
-            $sql .= "\n";
         }
 
-        return trim($sql);
+        $sql = implode(";\n", $alterStmts);
+        if ($joinTableStmts) {
+            $sql .= ($sql ? ";\n\n" : '') . implode("\n", $joinTableStmts);
+        }
+        return rtrim($sql, ";\n") . ';';
     }
 
     /**
-     * Generate the SQL to create a new table based on the entity's properties.
-     *
-     * @param ReflectionClass $ref   The entity class reflection
-     * @param string          $table The name of the table to create
-     * @return string               The SQL CREATE TABLE statement
+     * Map a PHP type to a SQL type.
+     * Defaults to VARCHAR(255) if no length is specified.
+     */
+    private function mapToSql(string $dbType, ?int $length = null): string
+    {
+        return match (strtolower($dbType)) {
+            'int','integer'   => 'INT NOT NULL',
+            'float','double'  => 'DOUBLE NOT NULL',
+            'bool','boolean'  => 'TINYINT(1) NOT NULL',
+            'text'            => 'TEXT NOT NULL',
+            default           => 'VARCHAR(' . ($length ?? 255) . ') NOT NULL',
+        };
+    }
+
+    /**
+     * Create a SQL CREATE TABLE statement for the given entity class.
+     * Assumes the class has a public 'id' property.
      */
     private function createTableSql(ReflectionClass $ref, string $table): string
     {
@@ -122,10 +176,7 @@ SQL;
     }
 
     /**
-     * Extract column definitions from the entity's properties.
-     *
-     * @param ReflectionClass $ref The entity class reflection
-     * @return array              Associative array of column definitions
+     * Extract scalar column definitions.  Skips ManyToMany properties.
      */
     private function getColumnDefinitions(ReflectionClass $ref): array
     {
@@ -134,50 +185,37 @@ SQL;
         foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
             $name = $prop->getName();
 
-            // ─── AUTO_INCREMENT primary key ───────────────────────────────
+            // skip join-table collections
+            if ($prop->getAttributes(ManyToMany::class)) {
+                continue;
+            }
+
             if ($name === 'id') {
-                // Always emit the id as INT NOT NULL AUTO_INCREMENT
                 $defs[$name] = "`id` INT NOT NULL AUTO_INCREMENT";
                 continue;
             }
 
-            // ─── the rest of your column-building logic ───────────────────
-            // Map PHP type → SQL, apply ColumnAttr overrides, etc.
             $type    = $prop->getType()?->getName() ?? 'string';
-            $sqlType = match (strtolower($type)) {
-                'int','integer'           => 'INT',
-                'float','double'          => 'DOUBLE',
-                'bool','boolean'          => 'TINYINT(1)',
-                'datetimeimmutable',
-                'datetime'                => 'TIMESTAMP NULL',
-                'text'                    => 'TEXT',
-                default                   => 'VARCHAR(255)',
-            };
+            $sqlType = $this->mapToSql($type);
 
-            // override via #[Column]
-            $colAttrs = $prop->getAttributes(ColumnAttr::class);
-            if ($colAttrs) {
+            if ($prop->getAttributes(ColumnAttr::class)) {
                 /** @var ColumnAttr $attr */
-                $attr     = $colAttrs[0]->newInstance();
+                $attr     = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
                 $sqlType  = strtoupper($attr->type   ?? $sqlType);
                 $length   = $attr->length            ? "({$attr->length})" : '';
                 $nullable = $attr->nullable          ? ' NULL' : ' NOT NULL';
                 $defs[$name] = "`{$name}` {$sqlType}{$length}{$nullable}";
-                continue;
+            } else {
+                $defs[$name] = "`{$name}` {$sqlType}";
             }
-
-            $nullable = str_contains($sqlType, 'NULL') ? '' : ' NOT NULL';
-            $defs[$name] = "`{$name}` {$sqlType}{$nullable}";
         }
 
         return $defs;
     }
 
     /**
-     * Attempt to auto-reverse common operations:
-     *  - CREATE TABLE → DROP TABLE IF EXISTS
-     *  - ALTER TABLE ADD COLUMN → ALTER TABLE DROP COLUMN
-     * Otherwise emits a `-- TODO` marker for manual fix.
+     * Generate a reverse migration SQL from the given SQL.
+     * This is a very basic implementation that only handles CREATE TABLE and ALTER TABLE ADD COLUMN.
      */
     private function autoReverse(string $sql): string
     {
@@ -185,7 +223,7 @@ SQL;
         $out   = [];
 
         foreach ($lines as $line) {
-            if (preg_match('/^CREATE\s+TABLE\s+`?(\w+)`?/', $line, $m)) {
+            if (preg_match('/^CREATE\s+TABLE\s+`?(\w+)`?/i', $line, $m)) {
                 $out[] = "DROP TABLE IF EXISTS `{$m[1]}`;";
             } elseif (preg_match('/^ALTER\s+TABLE\s+`?(\w+)`?\s+ADD\s+COLUMN\s+`?(\w+)`?/i', $line, $m)) {
                 $out[] = "ALTER TABLE `{$m[1]}` DROP COLUMN `{$m[2]}`;";
@@ -195,5 +233,15 @@ SQL;
         }
 
         return implode("\n", $out);
+    }
+
+    /**
+     * Convert a fully qualified class name to a snake_case table name.
+     * E.g. "App\Entity\User" becomes "user".
+     */
+    private function snake(string $class): string
+    {
+        $base = str_contains($class, '\\') ? substr($class, strrpos($class, '\\') + 1) : $class;
+        return strtolower(preg_replace('/([a-z])([A-Z])/', '$1_$2', $base));
     }
 }
