@@ -9,6 +9,9 @@ use MonkeysLegion\Entity\Attributes\Column as ColumnAttr;
 use MonkeysLegion\Entity\Attributes\Field as FieldAttr;
 use MonkeysLegion\Entity\Attributes\JoinTable;
 use MonkeysLegion\Entity\Attributes\ManyToMany;
+use MonkeysLegion\Entity\Attributes\ManyToOne;
+use MonkeysLegion\Entity\Attributes\OneToMany;
+use MonkeysLegion\Entity\Attributes\OneToOne;
 use ReflectionClass;
 use ReflectionProperty;
 
@@ -85,7 +88,7 @@ PHP;
 
             foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
 
-                /* ─── Many-to-Many detection ────────────────────────── */
+                /* ─── Many-to-Many (owning side) → create join-table, never a column */
                 foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
                     /** @var ManyToMany $meta */
                     $meta = $attr->newInstance();
@@ -104,6 +107,11 @@ CREATE TABLE IF NOT EXISTS `{$jt->name}` (
 SQL;
                     }
                     // mark property so we don't add a column for it
+                    $skipCols[] = $prop->getName();
+                }
+
+                /* ─── Any other relation (1-1 / 1-N / N-1) → also no column */
+                if ($this->isRelation($prop)) {
                     $skipCols[] = $prop->getName();
                 }
 
@@ -186,7 +194,7 @@ SQL;
             $name = $prop->getName();
 
             // skip join-table collections
-            if ($prop->getAttributes(ManyToMany::class)) {
+            if ($this->isRelation($prop)) {
                 continue;
             }
 
@@ -243,5 +251,14 @@ SQL;
     {
         $base = str_contains($class, '\\') ? substr($class, strrpos($class, '\\') + 1) : $class;
         return strtolower(preg_replace('/([a-z])([A-Z])/', '$1_$2', $base));
+    }
+
+    /** Is this property a relation attribute? */
+    private function isRelation(ReflectionProperty $p): bool
+    {
+        return $p->getAttributes(OneToOne::class)
+            || $p->getAttributes(OneToMany::class)
+            || $p->getAttributes(ManyToOne::class)
+            || $p->getAttributes(ManyToMany::class);
     }
 }
