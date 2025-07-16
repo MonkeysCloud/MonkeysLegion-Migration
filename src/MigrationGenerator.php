@@ -110,8 +110,18 @@ SQL;
                     $skipCols[] = $prop->getName();
                 }
 
-                /* ─── Any other relation (1-1 / 1-N / N-1) → also no column */
-                if ($this->isRelation($prop)) {
+                /* ─── One-to-One inverse side (has mappedBy) ───────────── */
+                foreach ($prop->getAttributes(OneToOne::class) as $a) {
+                    /** @var OneToOne $o2o */
+                    $o2o = $a->newInstance();
+                    if ($o2o->mappedBy) {
+                        // skip inverse side, it’s not a column
+                        $skipCols[] = $prop->getName();
+                    }
+                }
+
+                /* ─── One-to-Many is always inverse → never a column ───── */
+                if ($prop->getAttributes(OneToMany::class)) {
                     $skipCols[] = $prop->getName();
                 }
 
@@ -193,9 +203,14 @@ SQL;
         foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
             $name = $prop->getName();
 
-            // skip join-table collections
-            if ($this->isRelation($prop)) {
-                continue;
+            if (
+                $prop->getAttributes(OneToMany::class)
+                || ($prop->getAttributes(OneToOne::class)
+                    && $prop->getAttributes(OneToOne::class)[0]->newInstance()->mappedBy)
+                || $prop->getAttributes(ManyToMany::class)
+            )
+            {
+                continue; // skip relations
             }
 
             if ($name === 'id') {
