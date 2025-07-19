@@ -66,6 +66,7 @@ PHP;
 
     /**
      * Compute SQL to migrate current DB schema to match entity metadata.
+     * Now honours `$nullable` on ManyToOne / OneToOne owning sides.
      * Returns a complete SQL string ending with a semicolon.
      */
     public function diff(array $entities, array $schema): string
@@ -77,23 +78,20 @@ PHP;
             $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
             $table = strtolower($ref->getShortName());
 
-            /* 1️⃣  Table doesn’t exist → full CREATE */
+            /* 1️⃣  Table doesn’t exist → CREATE */
             if (!isset($schema[$table])) {
                 $alterStmts[] = $this->createTableSql($ref, $table);
-                // still gather join tables so foreign keys reference existing tables later
             }
 
             $existingCols = array_keys($schema[$table] ?? []);
-            $skipCols     = []; // columns to ignore because they represent ManyToMany relations
+            $skipCols     = [];
 
             foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
 
-                /* ─── Many-to-Many (owning side) → create join-table, never a column */
+                /* ── Many‑to‑Many (owning side) → join table only ─────────────────── */
                 foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
                     /** @var ManyToMany $meta */
                     $meta = $attr->newInstance();
-
-                    // Owning side = has joinTable metadata
                     if ($meta->joinTable instanceof JoinTable) {
                         $jt = $meta->joinTable;
                         $joinTableStmts[$jt->name] = <<<SQL
@@ -106,31 +104,54 @@ CREATE TABLE IF NOT EXISTS `{$jt->name}` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL;
                     }
-                    // mark property so we don't add a column for it
                     $skipCols[] = $prop->getName();
                 }
 
-                /* ─── One-to-One inverse side (has mappedBy) ───────────── */
+                /* ── One‑to‑One inverse side (mappedBy) → skip column ─────────────── */
                 foreach ($prop->getAttributes(OneToOne::class) as $a) {
-                    /** @var OneToOne $o2o */
                     $o2o = $a->newInstance();
                     if ($o2o->mappedBy) {
-                        // skip inverse side, it’s not a column
                         $skipCols[] = $prop->getName();
                     }
                 }
 
-                /* ─── One-to-Many is always inverse → never a column ───── */
+                /* ── One‑to‑Many inverse side → skip column ───────────────────────── */
                 if ($prop->getAttributes(OneToMany::class)) {
                     $skipCols[] = $prop->getName();
                 }
 
-                /* ─── Scalar / Field columns ───────────────────────── */
-                foreach ($prop->getAttributes(FieldAttr::class) as $attr) {
-                    $field = $attr->newInstance();
+                /* ── Many‑to‑One owning side → FK column honours nullable ─────────── */
+                if ($prop->getAttributes(ManyToOne::class)) {
+                    $m2o = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
+                    $fkCol = $prop->getName() . '_id';
+                    if (!in_array($fkCol, $existingCols, true)) {
+                        $null = $m2o->nullable ? ' NULL' : ' NOT NULL';
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` INT{$null}";
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$this->snake($m2o->targetEntity)}`(`id`)" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
+                    }
+                    $skipCols[] = $prop->getName();
+                }
+
+                /* ── One‑to‑One owning side (no mappedBy) → FK col honours nullable ─ */
+                if ($prop->getAttributes(OneToOne::class)) {
+                    $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
+                    if (!$o2o->mappedBy) {
+                        $fkCol = $prop->getName() . '_id';
+                        if (!in_array($fkCol, $existingCols, true)) {
+                            $null = $o2o->nullable ? ' NULL' : ' NOT NULL';
+                            $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` INT{$null}";
+                            $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$this->snake($o2o->targetEntity)}`(`id`)" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
+                        }
+                        $skipCols[] = $prop->getName();
+                    }
+                }
+
+                /* ── Scalar #[Field] columns ──────────────────────────────────────── */
+                foreach ($prop->getAttributes(FieldAttr::class) as $fa) {
+                    $field = $fa->newInstance();
                     $col   = $prop->getName();
                     if (in_array($col, $skipCols, true)) {
-                        continue; // relation property – skip
+                        continue;
                     }
                     if (!in_array($col, $existingCols, true)) {
                         $type = $this->mapToSql($field->type ?? 'string', $field->length ?? null);
@@ -138,7 +159,7 @@ SQL;
                     }
                 }
 
-                /* ─── Column overrides via #[Column] ──────────────── */
+                /* ── Column overrides via #[Column] ───────────────────────────────── */
                 if ($prop->getAttributes(ColumnAttr::class)) {
                     $attr = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
                     $col  = $prop->getName();
@@ -203,30 +224,52 @@ SQL;
         foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
             $name = $prop->getName();
 
+            // Skip pure inverse relations & Many-to-Many
             if (
                 $prop->getAttributes(OneToMany::class)
                 || ($prop->getAttributes(OneToOne::class)
                     && $prop->getAttributes(OneToOne::class)[0]->newInstance()->mappedBy)
                 || $prop->getAttributes(ManyToMany::class)
-            )
-            {
-                continue; // skip relations
+            ) {
+                continue;
             }
 
+            /* Many-to-One owning side → nullable FK */
+            if ($prop->getAttributes(ManyToOne::class)) {
+                $m2o      = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
+                $colName  = $name . '_id';
+                $nullable = $m2o->nullable ? ' NULL' : '';
+                $defs[$colName] = "`{$colName}` INT{$nullable}";
+                continue;
+            }
+
+            /* One-to-One owning side → nullable FK */
+            if ($prop->getAttributes(OneToOne::class)) {
+                $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
+                if (! $o2o->mappedBy) {
+                    $colName  = $name . '_id';
+                    $nullable = $o2o->nullable ? ' NULL' : '';
+                    $defs[$colName] = "`{$colName}` INT{$nullable}";
+                    continue;
+                }
+            }
+
+            /* Primary key */
             if ($name === 'id') {
                 $defs[$name] = "`id` INT NOT NULL AUTO_INCREMENT";
                 continue;
             }
 
+            /* Scalar field (or #[Column] override) */
             $type    = $prop->getType()?->getName() ?? 'string';
             $sqlType = $this->mapToSql($type);
 
             if ($prop->getAttributes(ColumnAttr::class)) {
                 /** @var ColumnAttr $attr */
                 $attr     = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
-                $sqlType  = strtoupper($attr->type   ?? $sqlType);
-                $length   = $attr->length            ? "({$attr->length})" : '';
-                $nullable = $attr->nullable          ? ' NULL' : ' NOT NULL';
+                $sqlType  = strtoupper($attr->type ?? $sqlType);
+                $length   = $attr->length   ? "({$attr->length})" : '';
+                $nullable = $attr->nullable ? ' NULL' : ' NOT NULL';
                 $defs[$name] = "`{$name}` {$sqlType}{$length}{$nullable}";
             } else {
                 $defs[$name] = "`{$name}` {$sqlType}";
