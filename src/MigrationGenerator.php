@@ -173,8 +173,23 @@ SQL;
 
                     if (!in_array($propName, $existingCols, true)) {
                         $field = $fa->newInstance();
-                        $type  = $this->mapToSql($field->type ?? 'string', $field->length ?? null);
-                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$type}";
+                        $wantNullable = (bool)($field->nullable ?? false);
+
+                        if (!in_array($propName, $existingCols, true)) {
+                            $type = $this->mapToSql($field->type ?? 'string', $field->length ?? null, $wantNullable);
+                            $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$type}";
+                        } else {
+                            // Column exists → check & fix nullability/type if needed
+                            $colMeta      = $schema[$table][$propName] ?? null; // expects ['nullable'=>bool, 'type'=>'varchar', 'length'=>255] if available
+                            $haveNullable = (bool)($colMeta['nullable'] ?? false);
+
+                            // If schema collector doesn’t provide metadata, we can still force a MODIFY safely.
+                            if ($haveNullable !== $wantNullable || $colMeta === null) {
+                                $base = $this->mapToSqlBase($field->type ?? 'string', $field->length ?? null);
+                                $null = $wantNullable ? 'NULL' : 'NOT NULL';
+                                $alterStmts[] = "ALTER TABLE `{$table}` MODIFY COLUMN `{$propName}` {$base} {$null}";
+                            }
+                        }
                     }
                 }
 
@@ -222,14 +237,19 @@ SQL;
      * Map a PHP type to a SQL type.
      * Defaults to VARCHAR(255) if no length is specified.
      */
-    private function mapToSql(string $dbType, ?int $length = null): string
+    private function mapToSql(string $dbType, ?int $length = null, bool $nullable = false): string
     {
+        $null = $nullable ? ' NULL' : ' NOT NULL';
+
         return match (strtolower($dbType)) {
-            'int','integer'   => 'INT NOT NULL',
-            'float','double'  => 'DOUBLE NOT NULL',
-            'bool','boolean'  => 'TINYINT(1) NOT NULL',
-            'text'            => 'TEXT NOT NULL',
-            default           => 'VARCHAR(' . ($length ?? 255) . ') NOT NULL',
+            'int','integer'        => "INT{$null}",
+            'float','double'       => "DOUBLE{$null}",
+            'bool','boolean'       => "TINYINT(1){$null}",
+            'text'                 => "TEXT{$null}",
+            'datetime','timestamp' => "DATETIME{$null}",
+            'date'                 => "DATE{$null}",
+            'time'                 => "TIME{$null}",
+            default                => 'VARCHAR(' . ($length ?? 255) . "){$null}",
         };
     }
 
@@ -296,8 +316,17 @@ SQL;
             }
 
             /* Scalar field (or #[Column] override) */
-            $type    = $prop->getType()?->getName() ?? 'string';
-            $sqlType = $this->mapToSql($type);
+            $type      = $prop->getType()?->getName() ?? 'string';
+            $nullable  = false;
+            if ($prop->getAttributes(FieldAttr::class)) {
+                $fa = $prop->getAttributes(FieldAttr::class)[0]->newInstance();
+                $type     = $fa->type ?? $type;
+                $length   = $fa->length ?? null;
+                $nullable = (bool)($fa->nullable ?? false);
+                $sqlType  = $this->mapToSql($type, $length, $nullable);
+            } else {
+                $sqlType  = $this->mapToSql($type, null, false);
+            }
 
             if ($prop->getAttributes(ColumnAttr::class)) {
                 /** @var ColumnAttr $attr */
@@ -354,4 +383,23 @@ SQL;
             || $p->getAttributes(ManyToOne::class)
             || $p->getAttributes(ManyToMany::class);
     }
+
+    /**
+     * Map a PHP type to a SQL base type.
+     * Defaults to VARCHAR(255) if no length is specified.
+     */
+    private function mapToSqlBase(string $dbType, ?int $length = null): string
+    {
+        return match (strtolower($dbType)) {
+            'int','integer'        => "INT",
+            'float','double'       => "DOUBLE",
+            'bool','boolean'       => "TINYINT(1)",
+            'text'                 => "TEXT",
+            'datetime','timestamp' => "DATETIME",
+            'date'                 => "DATE",
+            'time'                 => "TIME",
+            default                => 'VARCHAR(' . ($length ?? 255) . ')',
+        };
+    }
+
 }
