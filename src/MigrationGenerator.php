@@ -17,6 +17,9 @@ use ReflectionProperty;
 
 final class MigrationGenerator
 {
+    /** tables that must never be dropped automatically */
+    private array $protectedTables = ['migrations'];
+
     public function __construct(private Connection $db) {}
 
     /**
@@ -74,32 +77,36 @@ PHP;
         $alterStmts     = [];
         $joinTableStmts = [];
 
+        // NEW: track which tables should exist after sync
+        $seenEntityTables = [];
+        $seenJoinTables   = [];
+
         foreach ($entities as $entityFqcn) {
             $ref   = $entityFqcn instanceof \ReflectionClass ? $entityFqcn : new \ReflectionClass($entityFqcn);
             $table = strtolower($ref->getShortName());
 
-            // 1) Table doesn’t exist → CREATE
+            // track entity table
+            $seenEntityTables[$table] = true;
+
             if (!isset($schema[$table])) {
                 $alterStmts[] = $this->createTableSql($ref, $table);
-                // After a CREATE, nothing to drop for this table, continue.
-                $schema[$table] = []; // pretend now exists with no cols
+                $schema[$table] = [];
             }
 
             $existingCols = array_keys($schema[$table] ?? []);
             $skipCols     = [];
-
-            // We'll build the set of columns that SHOULD exist after syncing.
-            $expectedCols = ['id' => true]; // always keep id
+            $expectedCols = ['id' => true];
 
             foreach ($ref->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
                 $propName = $prop->getName();
 
-                // Many-to-Many (owning) => create join table, skip column
+                // ManyToMany → remember expected join table
                 foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
                     /** @var ManyToMany $meta */
                     $meta = $attr->newInstance();
                     if ($meta->joinTable instanceof JoinTable) {
                         $jt = $meta->joinTable;
+                        $seenJoinTables[$jt->name] = true;
                         $joinTableStmts[$jt->name] = <<<SQL
 CREATE TABLE IF NOT EXISTS `{$jt->name}` (
     `{$jt->joinColumn}` INT NOT NULL,
@@ -212,11 +219,8 @@ SQL;
 
             // ➋ DROP logic: anything in $existingCols that is NOT in $expectedCols should be dropped.
             foreach ($existingCols as $col) {
-                if ($col === 'id') {
-                    continue; // never drop PK here
-                }
+                if ($col === 'id') continue;
                 if (!isset($expectedCols[$col])) {
-                    // Drop FK constraint first if column looks like FK
                     if (str_ends_with($col, '_id')) {
                         $fkName = "fk_{$table}_{$col}";
                         $alterStmts[] = "ALTER TABLE `{$table}` DROP FOREIGN KEY `{$fkName}`";
@@ -226,10 +230,34 @@ SQL;
             }
         }
 
+        // ➊ DROP join tables that are not expected
+        $dropStmts = [];
+
+        foreach (array_keys($schema) as $tbl) {
+            if (in_array($tbl, $this->protectedTables, true)) {
+                continue;
+            }
+
+            $isEntityExpected = isset($seenEntityTables[$tbl]);
+            $isJoinExpected   = isset($seenJoinTables[$tbl]);
+
+            // If table is neither an expected entity table nor an expected join table → drop it
+            if (! $isEntityExpected && ! $isJoinExpected) {
+                $dropStmts[] = "DROP TABLE IF EXISTS `{$tbl}`";
+            }
+        }
+
+        // Compose final SQL with FK checks guard if we have drops
         $sql = implode(";\n", $alterStmts);
         if ($joinTableStmts) {
             $sql .= ($sql ? ";\n\n" : '') . implode("\n", $joinTableStmts);
         }
+        if ($dropStmts) {
+            $drops = implode(";\n", $dropStmts) . ';';
+            $guard = "SET FOREIGN_KEY_CHECKS=0;\n{$drops}\nSET FOREIGN_KEY_CHECKS=1;";
+            $sql  .= ($sql ? ";\n\n" : '') . $guard;
+        }
+
         return rtrim($sql, ";\n") . ';';
     }
 
