@@ -75,20 +75,26 @@ PHP;
         $joinTableStmts = [];
 
         foreach ($entities as $entityFqcn) {
-            $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
+            $ref   = $entityFqcn instanceof \ReflectionClass ? $entityFqcn : new \ReflectionClass($entityFqcn);
             $table = strtolower($ref->getShortName());
 
-            /* 1️⃣  Table doesn’t exist → CREATE */
+            // 1) Table doesn’t exist → CREATE
             if (!isset($schema[$table])) {
                 $alterStmts[] = $this->createTableSql($ref, $table);
+                // After a CREATE, nothing to drop for this table, continue.
+                $schema[$table] = []; // pretend now exists with no cols
             }
 
             $existingCols = array_keys($schema[$table] ?? []);
             $skipCols     = [];
 
-            foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            // We'll build the set of columns that SHOULD exist after syncing.
+            $expectedCols = ['id' => true]; // always keep id
 
-                /* ── Many‑to‑Many (owning side) → join table only ─────────────────── */
+            foreach ($ref->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
+                $propName = $prop->getName();
+
+                // Many-to-Many (owning) => create join table, skip column
                 foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
                     /** @var ManyToMany $meta */
                     $meta = $attr->newInstance();
@@ -104,74 +110,103 @@ CREATE TABLE IF NOT EXISTS `{$jt->name}` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL;
                     }
-                    $skipCols[] = $prop->getName();
+                    $skipCols[] = $propName;
                 }
 
-                /* ── One‑to‑One inverse side (mappedBy) → skip column ─────────────── */
+                // One-to-One inverse side => skip
                 foreach ($prop->getAttributes(OneToOne::class) as $a) {
                     $o2o = $a->newInstance();
                     if ($o2o->mappedBy) {
-                        $skipCols[] = $prop->getName();
+                        $skipCols[] = $propName;
                     }
                 }
 
-                /* ── One‑to‑Many inverse side → skip column ───────────────────────── */
+                // One-to-Many inverse => skip
                 if ($prop->getAttributes(OneToMany::class)) {
-                    $skipCols[] = $prop->getName();
+                    $skipCols[] = $propName;
                 }
 
-                /* ── Many‑to‑One owning side → FK column honours nullable ─────────── */
+                // Many-to-One owning side: FK col honours nullable
                 if ($prop->getAttributes(ManyToOne::class)) {
-                    $m2o = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
-                    $fkCol = $prop->getName() . '_id';
+                    $m2o   = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
+                    $fkCol = $propName . '_id';
+                    $expectedCols[$fkCol] = true;
+
                     if (!in_array($fkCol, $existingCols, true)) {
                         $null = $m2o->nullable ? ' NULL' : ' NOT NULL';
                         $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` INT{$null}";
                         $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$this->snake($m2o->targetEntity)}`(`id`)" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
                     }
-                    $skipCols[] = $prop->getName();
+                    $skipCols[] = $propName;
+                    continue;
                 }
 
-                /* ── One‑to‑One owning side (no mappedBy) → FK col honours nullable ─ */
+                // One-to-One owning side (no mappedBy): FK col honours nullable
                 if ($prop->getAttributes(OneToOne::class)) {
                     $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                     if (!$o2o->mappedBy) {
-                        $fkCol = $prop->getName() . '_id';
+                        $fkCol = $propName . '_id';
+                        $expectedCols[$fkCol] = true;
+
                         if (!in_array($fkCol, $existingCols, true)) {
                             $null = $o2o->nullable ? ' NULL' : ' NOT NULL';
                             $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` INT{$null}";
                             $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$this->snake($o2o->targetEntity)}`(`id`)" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
                         }
-                        $skipCols[] = $prop->getName();
+                        $skipCols[] = $propName;
+                        continue;
                     }
                 }
 
-                /* ── Scalar #[Field] columns ──────────────────────────────────────── */
+                // Primary key
+                if ($propName === 'id') {
+                    $expectedCols['id'] = true;
+                    continue;
+                }
+
+                // Scalar #[Field]
                 foreach ($prop->getAttributes(FieldAttr::class) as $fa) {
-                    $field = $fa->newInstance();
-                    $col   = $prop->getName();
-                    if (in_array($col, $skipCols, true)) {
-                        continue;
+                    if (in_array($propName, $skipCols, true)) {
+                        continue 2;
                     }
-                    if (!in_array($col, $existingCols, true)) {
-                        $type = $this->mapToSql($field->type ?? 'string', $field->length ?? null);
-                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$col}` {$type}";
+                    $expectedCols[$propName] = true;
+
+                    if (!in_array($propName, $existingCols, true)) {
+                        $field = $fa->newInstance();
+                        $type  = $this->mapToSql($field->type ?? 'string', $field->length ?? null);
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$type}";
                     }
                 }
 
-                /* ── Column overrides via #[Column] ───────────────────────────────── */
+                // #[Column] override
                 if ($prop->getAttributes(ColumnAttr::class)) {
-                    $attr = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
-                    $col  = $prop->getName();
-                    if (in_array($col, $skipCols, true)) {
+                    if (in_array($propName, $skipCols, true)) {
                         continue;
                     }
-                    if (!in_array($col, $existingCols, true)) {
-                        $sqlType = strtoupper($attr->type ?? 'VARCHAR(255)');
+                    $expectedCols[$propName] = true;
+
+                    if (!in_array($propName, $existingCols, true)) {
+                        $attr    = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
+                        $sqlType = strtoupper($attr->type ?? 'VARCHAR');
                         $length  = $attr->length ? "({$attr->length})" : '';
                         $null    = $attr->nullable ? ' NULL' : ' NOT NULL';
-                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$col}` {$sqlType}{$length}{$null}";
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$sqlType}{$length}{$null}";
                     }
+                }
+            }
+
+            // ➋ DROP logic: anything in $existingCols that is NOT in $expectedCols should be dropped.
+            foreach ($existingCols as $col) {
+                if ($col === 'id') {
+                    continue; // never drop PK here
+                }
+                if (!isset($expectedCols[$col])) {
+                    // Drop FK constraint first if column looks like FK
+                    if (str_ends_with($col, '_id')) {
+                        $fkName = "fk_{$table}_{$col}";
+                        $alterStmts[] = "ALTER TABLE `{$table}` DROP FOREIGN KEY `{$fkName}`";
+                    }
+                    $alterStmts[] = "ALTER TABLE `{$table}` DROP COLUMN `{$col}`";
                 }
             }
         }
