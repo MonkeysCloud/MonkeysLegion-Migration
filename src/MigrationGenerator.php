@@ -222,8 +222,10 @@ SQL;
                 if ($col === 'id') continue;
                 if (!isset($expectedCols[$col])) {
                     if (str_ends_with($col, '_id')) {
-                        $fkName = "fk_{$table}_{$col}";
-                        $alterStmts[] = "ALTER TABLE `{$table}` DROP FOREIGN KEY `{$fkName}`";
+                        $fkName = $this->fkName($table, $col);
+                        if ($fkName) {
+                            $alterStmts[] = "ALTER TABLE `{$table}` DROP FOREIGN KEY `{$fkName}`";
+                        }
                     }
                     $alterStmts[] = "ALTER TABLE `{$table}` DROP COLUMN `{$col}`";
                 }
@@ -428,6 +430,27 @@ SQL;
             'time'                 => "TIME",
             default                => 'VARCHAR(' . ($length ?? 255) . ')',
         };
+    }
+
+    /**
+     * Get the name of the foreign key constraint for a given table and column.
+     *
+     * @param string $table
+     * @param string $column
+     * @return string|null
+     */
+    private function fkName(string $table, string $column): ?string
+    {
+        $sql = "SELECT CONSTRAINT_NAME 
+              FROM information_schema.KEY_COLUMN_USAGE
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME   = :tbl
+               AND COLUMN_NAME  = :col
+               AND REFERENCED_TABLE_NAME IS NOT NULL
+             LIMIT 1";
+        $stmt = $this->db->pdo()->prepare($sql);
+        $stmt->execute(['tbl' => $table, 'col' => $column]);
+        return $stmt->fetchColumn() ?: null;
     }
 
 }
