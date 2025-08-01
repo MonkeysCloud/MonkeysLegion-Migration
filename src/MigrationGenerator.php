@@ -277,61 +277,62 @@ SQL;
 
         return match (strtolower($dbType)) {
             // Strings
-            'string'       => 'VARCHAR(' . ($length ?? 255) . "){$null}",
-            'char'         => 'CHAR(' . ($length ?? 1) . "){$null}",
-            'text'         => "TEXT{$null}",
-            'mediumtext'   => "MEDIUMTEXT{$null}",
-            'longtext'     => "LONGTEXT{$null}",
+            'string'       => 'VARCHAR(' . ($length ?? 255) . ')' . $null,
+            'char'         => 'CHAR('    . ($length ?? 1)   . ')' . $null,
+            'text'         => 'TEXT'         . $null,
+            'mediumtext'   => 'MEDIUMTEXT'   . $null,
+            'longtext'     => 'LONGTEXT'     . $null,
 
             // Integers
-            'integer', 'int'      => "INT{$null}",
-            'tinyint'             => "TINYINT" . ($length ? "({$length})" : "(1)") . "{$null}",
-            'smallint'            => "SMALLINT{$null}",
-            'bigint'              => "BIGINT{$null}",
-            'unsignedbigint'      => "BIGINT UNSIGNED{$null}",
+            'int', 'integer'  => 'INT'     . $null,
+            'tinyint'         => 'TINYINT' . ($length ? "($length)" : '(1)') . $null,
+            'smallint'        => 'SMALLINT' . $null,
+            'bigint'          => 'BIGINT'   . $null,
+            'unsignedbigint'  => 'BIGINT UNSIGNED' . $null,
 
-            // Decimals & floats
-            'decimal'             => 'DECIMAL(' . ($length ?? '10,2') . "){$null}",
-            'float'               => "FLOAT{$null}",
+            // Decimal & float
+            'decimal'         => 'DECIMAL(' . ($length ?? '10,2') . ')' . $null,
+            'float'           => 'FLOAT' . $null,
 
             // Boolean
-            'boolean'             => "TINYINT(1){$null}",
+            'boolean'         => 'TINYINT(1)' . $null,
 
-            // Dates & times
-            'date'                => "DATE{$null}",
-            'time'                => "TIME{$null}",
-            'datetime'            => "DATETIME{$null}",
-            'datetimetz'          => "DATETIME{$null}",
-            'timestamp'           => "TIMESTAMP{$null}",
-            'timestamptz'         => "TIMESTAMP{$null}",
-            'year'                => "YEAR{$null}",
+            // Date / time
+            'date'            => 'DATE'      . $null,
+            'time'            => 'TIME'      . $null,
+            'datetime'        => 'DATETIME'  . $null,
+            'datetimetz'      => 'DATETIME'  . $null,      // MySQL stores no TZ
+            'timestamp'       => 'TIMESTAMP' . $null,
+            'timestamptz'     => 'TIMESTAMP' . $null,      // idem
+            'year'            => 'YEAR'      . $null,
 
-            // UUID & binary
-            'uuid'                => "CHAR(36){$null}",
-            'binary'              => "BLOB{$null}",
+            // UUID & binary/blob
+            'uuid'            => 'CHAR(36)'  . $null,
+            'binary'          => 'BLOB'      . $null,
 
-            // JSON
-            'json'                => "JSON{$null}",
-            'simple_json'         => "TEXT{$null}",
-            'array'               => "TEXT{$null}",
-            'simple_array'        => "TEXT{$null}",
+            // JSON / arrays
+            'json'            => 'JSON'      . $null,
+            'simple_json',
+            'array',
+            'simple_array'    => 'TEXT'      . $null,     // serialize manually
 
-            // Enum & Set
-            'enum'                => "ENUM('value1','value2'){ $null }",
-            'set'                 => "SET('value1','value2'){ $null }",
+            // Enum / Set   → the caller **must** supply the allowed list via $length**
+            //   e.g. #[Field(type:'enum', length:"'draft','sent','failed'")]
+            'enum'            => 'ENUM(' . ($length ?? "'value1','value2'") . ')' . $null,
+            'set'             => 'SET('  . ($length ?? "'value1','value2'") . ')' . $null,
 
             // Spatial
-            'geometry'            => "GEOMETRY{$null}",
-            'point'               => "POINT{$null}",
-            'linestring'          => "LINESTRING{$null}",
-            'polygon'             => "POLYGON{$null}",
+            'geometry'        => 'GEOMETRY'   . $null,
+            'point'           => 'POINT'      . $null,
+            'linestring'      => 'LINESTRING' . $null,
+            'polygon'         => 'POLYGON'    . $null,
 
             // Network
-            'ipaddress'           => "VARCHAR(45){$null}",
-            'macaddress'          => "VARCHAR(17){$null}",
+            'ipaddress'       => 'VARCHAR(45)' . $null,   // IPv6-safe
+            'macaddress'      => 'VARCHAR(17)' . $null,
 
-            // Default
-            default               => 'VARCHAR(' . ($length ?? 255) . "){$null}",
+            // Fallback
+            default           => 'VARCHAR(' . ($length ?? 255) . ')' . $null,
         };
     }
 
