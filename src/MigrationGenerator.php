@@ -466,22 +466,76 @@ SQL;
             || $p->getAttributes(ManyToOne::class)
             || $p->getAttributes(ManyToMany::class);
     }
-
+    
     /**
-     * Map a PHP type to a SQL base type.
-     * Defaults to VARCHAR(255) if no length is specified.
+     * Map a PHP/DSL type to the raw MySQL column definition
+     * *without* any NULL / NOT NULL suffix.
+     *
+     * @param string      $dbType  logical type name (case-insensitive)
+     * @param int|string|null $length optional length / precision
      */
     private function mapToSqlBase(string $dbType, ?int $length = null): string
     {
         return match (strtolower($dbType)) {
-            'int','integer'        => "INT",
-            'float','double'       => "DOUBLE",
-            'bool','boolean'       => "TINYINT(1)",
-            'text'                 => "TEXT",
-            'datetime','timestamp' => "DATETIME",
-            'date'                 => "DATE",
-            'time'                 => "TIME",
-            default                => 'VARCHAR(' . ($length ?? 255) . ')',
+            /* ───── Strings ───── */
+            'string'       => 'VARCHAR(' . ($length ?? 255) . ')',
+            'char'         => 'CHAR('    . ($length ?? 1)   . ')',
+            'text'         => 'TEXT',
+            'mediumtext'   => 'MEDIUMTEXT',
+            'longtext'     => 'LONGTEXT',
+
+            /* ───── Integers ───── */
+            'int', 'integer'     => 'INT',
+            'tinyint'            => 'TINYINT' . ($length ? "($length)" : '(1)'),
+            'smallint'           => 'SMALLINT',
+            'bigint'             => 'BIGINT',
+            'unsignedbigint'     => 'BIGINT UNSIGNED',
+
+            /* ───── Decimals & floats ───── */
+            'decimal'            => 'DECIMAL(' . ($length ?? '10,2') . ')',
+            'float', 'double'    => 'FLOAT',
+
+            /* ───── Boolean ───── */
+            'boolean', 'bool'    => 'TINYINT(1)',
+
+            /* ───── Date & time ───── */
+            'date'               => 'DATE',
+            'time'               => 'TIME',
+            'datetime'           => 'DATETIME',
+            'datetimetz'         => 'DATETIME',      // MySQL stores no TZ
+            'timestamp'          => 'TIMESTAMP',
+            'timestamptz'        => 'TIMESTAMP',     // idem
+            'year'               => 'YEAR',
+
+            /* ───── UUID & binary/blob ───── */
+            'uuid'               => 'CHAR(36)',      // store text UUID
+            'binary'             => 'BLOB',
+
+            /* ───── JSON & serialised ───── */
+            'json'               => 'JSON',
+            'simple_json',
+            'array',
+            'simple_array'       => 'TEXT',          // serialize manually
+
+            /* ───── Enum / Set ─────
+             * caller must pass allowed values in $length:
+             *    #[Field(type:'enum', length:"'draft','sent','failed'")]
+             */
+            'enum'               => 'ENUM(' . ($length ?? "'value1','value2'") . ')',
+            'set'                => 'SET('  . ($length ?? "'value1','value2'") . ')',
+
+            /* ───── Spatial ───── */
+            'geometry'           => 'GEOMETRY',
+            'point'              => 'POINT',
+            'linestring'         => 'LINESTRING',
+            'polygon'            => 'POLYGON',
+
+            /* ───── Network ───── */
+            'ipaddress'          => 'VARCHAR(45)',   // IPv6-safe
+            'macaddress'         => 'VARCHAR(17)',
+
+            /* ───── Fallback ───── */
+            default              => 'VARCHAR(' . ($length ?? 255) . ')',
         };
     }
 
