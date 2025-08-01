@@ -264,22 +264,74 @@ SQL;
     }
 
     /**
-     * Map a PHP type to a SQL type.
-     * Defaults to VARCHAR(255) if no length is specified.
+    * Map a PHP type to a SQL type with optional length and nullability.
+     *
+     * @param string $dbType The PHP type (e.g. 'string', 'int', 'date').
+     * @param int|null $length Optional length for types that require it (e.g. VARCHAR).
+     * @param bool $nullable Whether the column should allow NULL values.
+     * @return string The SQL type definition.
      */
     private function mapToSql(string $dbType, ?int $length = null, bool $nullable = false): string
     {
         $null = $nullable ? ' NULL' : ' NOT NULL';
 
         return match (strtolower($dbType)) {
-            'int','integer'        => "INT{$null}",
-            'float','double'       => "DOUBLE{$null}",
-            'bool','boolean'       => "TINYINT(1){$null}",
-            'text'                 => "TEXT{$null}",
-            'datetime','timestamp' => "DATETIME{$null}",
-            'date'                 => "DATE{$null}",
-            'time'                 => "TIME{$null}",
-            default                => 'VARCHAR(' . ($length ?? 255) . "){$null}",
+            // Strings
+            'string'       => 'VARCHAR(' . ($length ?? 255) . "){$null}",
+            'char'         => 'CHAR(' . ($length ?? 1) . "){$null}",
+            'text'         => "TEXT{$null}",
+            'mediumtext'   => "MEDIUMTEXT{$null}",
+            'longtext'     => "LONGTEXT{$null}",
+
+            // Integers
+            'integer', 'int'      => "INT{$null}",
+            'tinyint'             => "TINYINT" . ($length ? "({$length})" : "(1)") . "{$null}",
+            'smallint'            => "SMALLINT{$null}",
+            'bigint'              => "BIGINT{$null}",
+            'unsignedbigint'      => "BIGINT UNSIGNED{$null}",
+
+            // Decimals & floats
+            'decimal'             => 'DECIMAL(' . ($length ?? '10,2') . "){$null}",
+            'float'               => "FLOAT{$null}",
+
+            // Boolean
+            'boolean'             => "TINYINT(1){$null}",
+
+            // Dates & times
+            'date'                => "DATE{$null}",
+            'time'                => "TIME{$null}",
+            'datetime'            => "DATETIME{$null}",
+            'datetimetz'          => "DATETIME{$null}",
+            'timestamp'           => "TIMESTAMP{$null}",
+            'timestamptz'         => "TIMESTAMP{$null}",
+            'year'                => "YEAR{$null}",
+
+            // UUID & binary
+            'uuid'                => "CHAR(36){$null}",
+            'binary'              => "BLOB{$null}",
+
+            // JSON
+            'json'                => "JSON{$null}",
+            'simple_json'         => "TEXT{$null}",
+            'array'               => "TEXT{$null}",
+            'simple_array'        => "TEXT{$null}",
+
+            // Enum & Set
+            'enum'                => "ENUM('value1','value2'){ $null }",
+            'set'                 => "SET('value1','value2'){ $null }",
+
+            // Spatial
+            'geometry'            => "GEOMETRY{$null}",
+            'point'               => "POINT{$null}",
+            'linestring'          => "LINESTRING{$null}",
+            'polygon'             => "POLYGON{$null}",
+
+            // Network
+            'ipaddress'           => "VARCHAR(45){$null}",
+            'macaddress'          => "VARCHAR(17){$null}",
+
+            // Default
+            default               => 'VARCHAR(' . ($length ?? 255) . "){$null}",
         };
     }
 
