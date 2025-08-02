@@ -77,7 +77,6 @@ PHP;
         $alterStmts     = [];
         $joinTableStmts = [];
 
-        // NEW: track which tables should exist after sync
         $seenEntityTables = [];
         $seenJoinTables   = [];
 
@@ -178,24 +177,28 @@ SQL;
                     }
                     $expectedCols[$propName] = true;
 
+                    $field        = $fa->newInstance();
+                    $wantNullable = (bool) ($field->nullable ?? false);
+                    $wantBase     = $this->mapToSqlBase(
+                        $field->type   ?? 'string',
+                        $field->length ?? null
+                    );
+                    $wantSql = "{$wantBase} " . ($wantNullable ? 'NULL' : 'NOT NULL');
+
                     if (!in_array($propName, $existingCols, true)) {
-                        $field = $fa->newInstance();
-                        $wantNullable = (bool)($field->nullable ?? false);
+                        // ① brand-new column
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$wantSql}";
+                    } else {
+                        // ② column already present → compare & modify
+                        $colMeta      = $schema[$table][$propName] ?? null;
+                        $haveNullable = (bool) ($colMeta['nullable'] ?? false);
+                        $haveBase     = $this->mapToSqlBase(
+                            $colMeta['type']   ?? '',
+                            $colMeta['length'] ?? null
+                        );
 
-                        if (!in_array($propName, $existingCols, true)) {
-                            $type = $this->mapToSql($field->type ?? 'string', $field->length ?? null, $wantNullable);
-                            $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$type}";
-                        } else {
-                            // Column exists → check & fix nullability/type if needed
-                            $colMeta      = $schema[$table][$propName] ?? null; // expects ['nullable'=>bool, 'type'=>'varchar', 'length'=>255] if available
-                            $haveNullable = (bool)($colMeta['nullable'] ?? false);
-
-                            // If schema collector doesn’t provide metadata, we can still force a MODIFY safely.
-                            if ($haveNullable !== $wantNullable || $colMeta === null) {
-                                $base = $this->mapToSqlBase($field->type ?? 'string', $field->length ?? null);
-                                $null = $wantNullable ? 'NULL' : 'NOT NULL';
-                                $alterStmts[] = "ALTER TABLE `{$table}` MODIFY COLUMN `{$propName}` {$base} {$null}";
-                            }
+                        if ($wantNullable !== $haveNullable || $wantBase !== $haveBase) {
+                            $alterStmts[] = "ALTER TABLE `{$table}` MODIFY COLUMN `{$propName}` {$wantSql}";
                         }
                     }
                 }
@@ -466,7 +469,7 @@ SQL;
             || $p->getAttributes(ManyToOne::class)
             || $p->getAttributes(ManyToMany::class);
     }
-    
+
     /**
      * Map a PHP/DSL type to the raw MySQL column definition
      * *without* any NULL / NOT NULL suffix.
