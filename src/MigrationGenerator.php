@@ -254,13 +254,20 @@ SQL;
         // Compose final SQL with FK checks guard if we have drops
         $sql = implode(";\n", $alterStmts);
         if ($sql !== '') {
+            if (!str_ends_with($sql, ';')) {
+                $sql .= ';';
+            }
             $sql = "SET FOREIGN_KEY_CHECKS=0;\n{$sql}\nSET FOREIGN_KEY_CHECKS=1;";
         }
         if ($joinTableStmts) {
             $sql .= ($sql ? "\n\n" : '') . implode("\n", $joinTableStmts);
         }
         if ($dropStmts) {
-            $drops = implode(";\n", $dropStmts) . ';';
+            $drops = implode(";\n", $dropStmts);
+            if (!str_ends_with($drops, ';')) {
+                $drops .= ';';
+            }
+
             $guard = "SET FOREIGN_KEY_CHECKS=0;\n{$drops}\nSET FOREIGN_KEY_CHECKS=1;";
             $sql  .= ($sql ? "\n\n" : '') . $guard;
         }
