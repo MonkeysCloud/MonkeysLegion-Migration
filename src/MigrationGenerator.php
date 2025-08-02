@@ -179,25 +179,24 @@ SQL;
 
                     $field        = $fa->newInstance();
                     $wantNullable = (bool) ($field->nullable ?? false);
-                    $wantBase     = $this->mapToSqlBase(
-                        $field->type   ?? 'string',
-                        $field->length ?? null
-                    );
-                    $wantSql = "{$wantBase} " . ($wantNullable ? 'NULL' : 'NOT NULL');
+                    $wantBase     = $this->mapToSqlBase($field->type ?? 'string', $field->length ?? null);
+                    $wantDefault  = $field->default ?? null;                       // NEW
+                    $wantSql      = "{$wantBase} " . ($wantNullable ? 'NULL' : 'NOT NULL')
+                        . $this->renderDefault($wantDefault, $field->type ?? 'string');  // NEW
 
                     if (!in_array($propName, $existingCols, true)) {
-                        // ① brand-new column
+                        /* ① brand-new column */
                         $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$wantSql}";
                     } else {
-                        // ② column already present → compare & modify
-                        $colMeta      = $schema[$table][$propName] ?? null;
+                        /* ② column already present → compare & modify */
+                        $colMeta      = $schema[$table][$propName] ?? null;        // expects ['type','length','nullable','default']
                         $haveNullable = (bool) ($colMeta['nullable'] ?? false);
-                        $haveBase     = $this->mapToSqlBase(
-                            $colMeta['type']   ?? '',
-                            $colMeta['length'] ?? null
-                        );
+                        $haveBase     = $this->mapToSqlBase($colMeta['type'] ?? '', $colMeta['length'] ?? null);
+                        $haveDefault  = $colMeta['default'] ?? null;
 
-                        if ($wantNullable !== $haveNullable || $wantBase !== $haveBase) {
+                        if ($wantNullable !== $haveNullable
+                            || $wantBase     !== $haveBase
+                            || $wantDefault  !== $haveDefault) {
                             $alterStmts[] = "ALTER TABLE `{$table}` MODIFY COLUMN `{$propName}` {$wantSql}";
                         }
                     }
@@ -422,7 +421,8 @@ SQL;
                 $nullable = $attr->nullable ? ' NULL' : ' NOT NULL';
                 $defs[$name] = "`{$name}` {$sqlType}{$length}{$nullable}";
             } else {
-                $defs[$name] = "`{$name}` {$sqlType}";
+                $defs[$name] = "`{$name}` {$sqlType}"
+                    . $this->renderDefault($field->default ?? null, $field->type ?? 'string');
             }
         }
 
@@ -561,6 +561,33 @@ SQL;
         $stmt = $this->db->pdo()->prepare($sql);
         $stmt->execute(['tbl' => $table, 'col' => $column]);
         return $stmt->fetchColumn() ?: null;
+    }
+
+    /**
+    * Render a default value for a column based on its PHP type.
+     * This is used in the migration SQL to set default values for columns.
+     *
+     * @param mixed $value The value to render as a default.
+     * @param string $phpType The PHP type of the column (e.g. 'string', 'int').
+     * @return string The SQL snippet for the default value.
+     */
+    private function renderDefault(mixed $value, string $phpType): string
+    {
+        if ($value === null) {
+            return '';
+        }
+
+        // quote strings / JSON – leave numbers & booleans alone
+        $needsQuotes = match (\strtolower($phpType)) {
+            'string', 'text', 'char', 'uuid', 'json', 'simple_json',
+            'array', 'simple_array', 'enum', 'set' => true,
+            default => false,
+        };
+
+        $literal = $needsQuotes ? $this->db->pdo()->quote((string) $value)
+            : (string) $value;
+
+        return " DEFAULT {$literal}";
     }
 
 }
