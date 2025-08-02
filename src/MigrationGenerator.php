@@ -253,6 +253,9 @@ SQL;
 
         // Compose final SQL with FK checks guard if we have drops
         $sql = implode(";\n", $alterStmts);
+        if ($sql !== '') {
+            $sql = "SET FOREIGN_KEY_CHECKS=0;\n{$sql}\nSET FOREIGN_KEY_CHECKS=1;";
+        }
         if ($joinTableStmts) {
             $sql .= ($sql ? ";\n\n" : '') . implode("\n", $joinTableStmts);
         }
@@ -409,8 +412,12 @@ SQL;
                 $length   = $fa->length ?? null;
                 $nullable = (bool)($fa->nullable ?? false);
                 $sqlType  = $this->mapToSql($type, $length, $nullable);
+                $default  = $fa->default ?? null;
+                $phpType  = $fa->type   ?? $type;
             } else {
                 $sqlType  = $this->mapToSql($type, null, false);
+                $default  = null;
+                $phpType  = $type;
             }
 
             if ($prop->getAttributes(ColumnAttr::class)) {
@@ -419,10 +426,11 @@ SQL;
                 $sqlType  = strtoupper($attr->type ?? $sqlType);
                 $length   = $attr->length   ? "({$attr->length})" : '';
                 $nullable = $attr->nullable ? ' NULL' : ' NOT NULL';
-                $defs[$name] = "`{$name}` {$sqlType}{$length}{$nullable}";
+                $defs[$name] = "`{$name}` {$sqlType}{$length}{$nullable}"
+                    . $this->renderDefault($attr->default ?? null, $attr->type ?? 'string');
             } else {
                 $defs[$name] = "`{$name}` {$sqlType}"
-                    . $this->renderDefault($field->default ?? null, $field->type ?? 'string');
+                    . $this->renderDefault($default, $phpType);
             }
         }
 
