@@ -257,12 +257,12 @@ SQL;
             $sql = "SET FOREIGN_KEY_CHECKS=0;\n{$sql}\nSET FOREIGN_KEY_CHECKS=1;";
         }
         if ($joinTableStmts) {
-            $sql .= ($sql ? ";\n\n" : '') . implode("\n", $joinTableStmts);
+            $sql .= ($sql ? "\n\n" : '') . implode("\n", $joinTableStmts);
         }
         if ($dropStmts) {
             $drops = implode(";\n", $dropStmts) . ';';
             $guard = "SET FOREIGN_KEY_CHECKS=0;\n{$drops}\nSET FOREIGN_KEY_CHECKS=1;";
-            $sql  .= ($sql ? ";\n\n" : '') . $guard;
+            $sql .= ($sql ? "\n\n" : '') . $guard;
         }
 
         return rtrim($sql, ";\n") . ';';
