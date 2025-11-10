@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace MonkeysLegion\Migration;
@@ -112,7 +113,7 @@ CREATE TABLE IF NOT EXISTS `{$jt->name}` (
     `{$jt->inverseColumn}` INT NOT NULL,
     PRIMARY KEY (`{$jt->joinColumn}`, `{$jt->inverseColumn}`),
     FOREIGN KEY (`{$jt->joinColumn}`)   REFERENCES `{$table}`(`id`)   ON DELETE CASCADE,
-    FOREIGN KEY (`{$jt->inverseColumn}`) REFERENCES `{$this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '')}`(`id`) ON DELETE CASCADE
+    FOREIGN KEY (`{$jt->inverseColumn}`) REFERENCES `{$this->snake($meta->targetEntity ??$prop->getType()?->getName() ?? '')}`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL;
                     }
@@ -179,24 +180,27 @@ SQL;
 
                     $field        = $fa->newInstance();
                     $wantNullable = (bool) ($field->nullable ?? false);
-                    $wantBase     = $this->mapToSqlBase($field->type ?? 'string', $field->length ?? null);
-                    $wantDefault  = $field->default ?? null;                       // NEW
+                    $enumValues   = $field->enumValues ?? null;
+                    $wantBase     = $this->mapToSqlBase($field->type ?? 'string', $field->length ?? null, $enumValues);
+                    $wantDefault  = $field->default ?? null;
                     $wantSql      = "{$wantBase} " . ($wantNullable ? 'NULL' : 'NOT NULL')
-                        . $this->renderDefault($wantDefault, $field->type ?? 'string');  // NEW
+                        . $this->renderDefault($wantDefault, $field->type ?? 'string');
 
                     if (!in_array($propName, $existingCols, true)) {
                         /* ① brand-new column */
                         $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$propName}` {$wantSql}";
                     } else {
                         /* ② column already present → compare & modify */
-                        $colMeta      = $schema[$table][$propName] ?? null;        // expects ['type','length','nullable','default']
+                        $colMeta      = $schema[$table][$propName] ?? null;
                         $haveNullable = (bool) ($colMeta['nullable'] ?? false);
                         $haveBase     = $this->mapToSqlBase($colMeta['type'] ?? '', $colMeta['length'] ?? null);
                         $haveDefault  = $colMeta['default'] ?? null;
 
-                        if ($wantNullable !== $haveNullable
+                        if (
+                            $wantNullable !== $haveNullable
                             || $wantBase     !== $haveBase
-                            || $wantDefault  !== $haveDefault) {
+                            || $wantDefault  !== $haveDefault
+                        ) {
                             $alterStmts[] = "ALTER TABLE `{$table}` MODIFY COLUMN `{$propName}` {$wantSql}";
                         }
                     }
@@ -276,14 +280,14 @@ SQL;
     }
 
     /**
-    * Map a PHP type to a SQL type with optional length and nullability.
+     * Map a PHP type to a SQL type with optional length and nullability.
      *
      * @param string $dbType The PHP type (e.g. 'string', 'int', 'date').
      * @param int|null $length Optional length for types that require it (e.g. VARCHAR).
      * @param bool $nullable Whether the column should allow NULL values.
      * @return string The SQL type definition.
      */
-    private function mapToSql(string $dbType, ?int $length = null, bool $nullable = false): string
+    private function mapToSql(string $dbType, ?int $length = null, bool $nullable = false, ?array $enumValues = null): string
     {
         $null = $nullable ? ' NULL' : ' NOT NULL';
 
@@ -328,10 +332,9 @@ SQL;
             'array',
             'simple_array'    => 'TEXT'      . $null,     // serialize manually
 
-            // Enum / Set   → the caller **must** supply the allowed list via $length**
-            //   e.g. #[Field(type:'enum', length:"'draft','sent','failed'")]
-            'enum'            => 'ENUM(' . ($length ?? "'value1','value2'") . ')' . $null,
-            'set'             => 'SET('  . ($length ?? "'value1','value2'") . ')' . $null,
+            // Enum / Set   → use enumValues if provided, otherwise fall back to length
+            'enum'            => 'ENUM(' . ($enumValues ? $this->formatEnumValues($enumValues) : ($length ?? "'value1','value2'")) . ')' . $null,
+            'set'             => 'SET('  . ($enumValues ? $this->formatEnumValues($enumValues) : ($length ?? "'value1','value2'")) . ')' . $null,
 
             // Spatial
             'geometry'        => 'GEOMETRY'   . $null,
@@ -350,22 +353,37 @@ SQL;
 
     /**
      * Create a SQL CREATE TABLE statement for the given entity class.
-     * Assumes the class has a public 'id' property.
+     * Determines primary key from Field attributes with primaryKey=true.
      */
     private function createTableSql(ReflectionClass $ref, string $table): string
     {
         $cols = $this->getColumnDefinitions($ref);
         $defs = implode(",\n  ", $cols);
+
+        // Find primary key from Field attributes
+        $primaryKey = 'id'; // default fallback
+        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            $attrs = $prop->getAttributes(FieldAttr::class);
+            if ($attrs) {
+                $attr = $attrs[0]->newInstance();
+                if ($attr->primaryKey) {
+                    $primaryKey = $prop->getName();
+                    break;
+                }
+            }
+        }
+
         return <<<SQL
 CREATE TABLE `{$table}` (
   {$defs},
-  PRIMARY KEY (`id`)
+  PRIMARY KEY (`{$primaryKey}`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL;
     }
 
     /**
-     * Extract scalar column definitions.  Skips ManyToMany properties.
+     * Extract scalar column definitions based on Field attributes.
+     * Skips relations (ManyToMany, OneToMany, inverse OneToOne).
      */
     private function getColumnDefinitions(ReflectionClass $ref): array
     {
@@ -384,61 +402,67 @@ SQL;
                 continue;
             }
 
-            /* Many-to-One owning side → nullable FK */
+            /* Many-to-One owning side → FK column */
             if ($prop->getAttributes(ManyToOne::class)) {
                 $m2o      = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
                 $colName  = $name . '_id';
-                $nullable = $m2o->nullable ? ' NULL' : '';
+                $nullable = $m2o->nullable ? ' NULL' : ' NOT NULL';
                 $defs[$colName] = "`{$colName}` INT{$nullable}";
                 continue;
             }
 
-            /* One-to-One owning side → nullable FK */
+            /* One-to-One owning side → FK column */
             if ($prop->getAttributes(OneToOne::class)) {
                 $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
-                if (! $o2o->mappedBy) {
+                if (!$o2o->mappedBy) {
                     $colName  = $name . '_id';
-                    $nullable = $o2o->nullable ? ' NULL' : '';
+                    $nullable = $o2o->nullable ? ' NULL' : ' NOT NULL';
                     $defs[$colName] = "`{$colName}` INT{$nullable}";
                     continue;
                 }
             }
 
-            /* Primary key */
-            if ($name === 'id') {
-                $defs[$name] = "`id` INT NOT NULL AUTO_INCREMENT";
+            /* Scalar field with #[Field] attribute */
+            $attrs = $prop->getAttributes(FieldAttr::class);
+            if ($attrs) {
+                $fa         = $attrs[0]->newInstance();
+                $type       = $fa->type ?? 'string';
+                $length     = $fa->length ?? null;
+                $nullable   = (bool)($fa->nullable ?? false);
+                $enumValues = $fa->enumValues ?? null;
+                $autoInc    = $fa->autoIncrement;
+
+                // Build SQL type
+                $sqlBase = $this->mapToSqlBase($type, $length, $enumValues);
+                $sqlType = $this->mapToSql($type, $length, $nullable, $enumValues);
+                $default = $fa->default ?? null;
+                $phpType = $fa->type ?? $type;
+
+                // Handle auto-increment
+                $autoIncSuffix = $autoInc ? ' AUTO_INCREMENT' : '';
+
+                $defs[$name] = "`{$name}` {$sqlType}{$autoIncSuffix}"
+                    . $this->renderDefault($default, $phpType);
                 continue;
             }
 
-            /* Scalar field (or #[Column] override) */
-            $type      = $prop->getType()?->getName() ?? 'string';
-            $nullable  = false;
-            if ($prop->getAttributes(FieldAttr::class)) {
-                $fa = $prop->getAttributes(FieldAttr::class)[0]->newInstance();
-                $type     = $fa->type ?? $type;
-                $length   = $fa->length ?? null;
-                $nullable = (bool)($fa->nullable ?? false);
-                $sqlType  = $this->mapToSql($type, $length, $nullable);
-                $default  = $fa->default ?? null;
-                $phpType  = $fa->type   ?? $type;
-            } else {
-                $sqlType  = $this->mapToSql($type, null, false);
-                $default  = null;
-                $phpType  = $type;
-            }
-
-            if ($prop->getAttributes(ColumnAttr::class)) {
+            /* #[Column] override */
+            $colAttrs = $prop->getAttributes(ColumnAttr::class);
+            if ($colAttrs) {
                 /** @var ColumnAttr $attr */
-                $attr     = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
-                $sqlType  = strtoupper($attr->type ?? $sqlType);
-                $length   = $attr->length   ? "({$attr->length})" : '';
+                $attr     = $colAttrs[0]->newInstance();
+                $sqlType  = strtoupper($attr->type ?? 'VARCHAR');
+                $length   = $attr->length ? "({$attr->length})" : '';
                 $nullable = $attr->nullable ? ' NULL' : ' NOT NULL';
                 $defs[$name] = "`{$name}` {$sqlType}{$length}{$nullable}"
                     . $this->renderDefault($attr->default ?? null, $attr->type ?? 'string');
-            } else {
-                $defs[$name] = "`{$name}` {$sqlType}"
-                    . $this->renderDefault($default, $phpType);
+                continue;
             }
+
+            /* Fallback for properties without attributes */
+            $type = $prop->getType()?->getName() ?? 'string';
+            $sqlType = $this->mapToSql($type, null, false);
+            $defs[$name] = "`{$name}` {$sqlType}";
         }
 
         return $defs;
@@ -491,79 +515,47 @@ SQL;
      *
      * @param string      $dbType  logical type name (case-insensitive)
      * @param int|string|null $length optional length / precision
+     * @param array|null $enumValues optional enum values
      */
-    private function mapToSqlBase(string $dbType, ?int $length = null): string
+    private function mapToSqlBase(string $dbType, $length = null, ?array $enumValues = null): string
     {
         return match (strtolower($dbType)) {
-            /* ───── Strings ───── */
-            'string'       => 'VARCHAR(' . ($length ?? 255) . ')',
-            'char'         => 'CHAR('    . ($length ?? 1)   . ')',
-            'text'         => 'TEXT',
-            'mediumtext'   => 'MEDIUMTEXT',
-            'longtext'     => 'LONGTEXT',
-
-            /* ───── Integers ───── */
+            'string'             => 'VARCHAR(' . ($length ?? 255) . ')',
+            'char'               => 'CHAR(' . ($length ?? 1) . ')',
+            'text'               => 'TEXT',
+            'mediumtext'         => 'MEDIUMTEXT',
+            'longtext'           => 'LONGTEXT',
             'int', 'integer'     => 'INT',
             'tinyint'            => 'TINYINT' . ($length ? "($length)" : '(1)'),
             'smallint'           => 'SMALLINT',
             'bigint'             => 'BIGINT',
             'unsignedbigint'     => 'BIGINT UNSIGNED',
-
-            /* ───── Decimals & floats ───── */
             'decimal'            => 'DECIMAL(' . ($length ?? '10,2') . ')',
             'float', 'double'    => 'FLOAT',
-
-            /* ───── Boolean ───── */
             'boolean', 'bool'    => 'TINYINT(1)',
-
-            /* ───── Date & time ───── */
             'date'               => 'DATE',
             'time'               => 'TIME',
             'datetime'           => 'DATETIME',
-            'datetimetz'         => 'DATETIME',      // MySQL stores no TZ
+            'datetimetz'         => 'DATETIME',
             'timestamp'          => 'TIMESTAMP',
-            'timestamptz'        => 'TIMESTAMP',     // idem
+            'timestamptz'        => 'TIMESTAMP',
             'year'               => 'YEAR',
-
-            /* ───── UUID & binary/blob ───── */
-            'uuid'               => 'CHAR(36)',      // store text UUID
+            'uuid'               => 'CHAR(36)',
             'binary'             => 'BLOB',
-
-            /* ───── JSON & serialised ───── */
             'json'               => 'JSON',
-            'simple_json',
-            'array',
-            'simple_array'       => 'TEXT',          // serialize manually
-
-            /* ───── Enum / Set ─────
-             * caller must pass allowed values in $length:
-             *    #[Field(type:'enum', length:"'draft','sent','failed'")]
-             */
-            'enum'               => 'ENUM(' . ($length ?? "'value1','value2'") . ')',
-            'set'                => 'SET('  . ($length ?? "'value1','value2'") . ')',
-
-            /* ───── Spatial ───── */
+            'simple_json', 'array', 'simple_array' => 'TEXT',
+            'enum'               => 'ENUM(' . ($enumValues ? $this->formatEnumValues($enumValues) : ($length ?? "'value1','value2'")) . ')',
+            'set'                => 'SET(' . ($enumValues ? $this->formatEnumValues($enumValues) : ($length ?? "'value1','value2'")) . ')',
             'geometry'           => 'GEOMETRY',
             'point'              => 'POINT',
             'linestring'         => 'LINESTRING',
             'polygon'            => 'POLYGON',
-
-            /* ───── Network ───── */
-            'ipaddress'          => 'VARCHAR(45)',   // IPv6-safe
+            'ipaddress'          => 'VARCHAR(45)',
             'macaddress'         => 'VARCHAR(17)',
-
-            /* ───── Fallback ───── */
             default              => 'VARCHAR(' . ($length ?? 255) . ')',
         };
     }
 
-    /**
-     * Get the name of the foreign key constraint for a given table and column.
-     *
-     * @param string $table
-     * @param string $column
-     * @return string|null
-     */
     private function fkName(string $table, string $column): ?string
     {
         $sql = "SELECT CONSTRAINT_NAME 
@@ -578,24 +570,28 @@ SQL;
         return $stmt->fetchColumn() ?: null;
     }
 
-    /**
-    * Render a default value for a column based on its PHP type.
-     * This is used in the migration SQL to set default values for columns.
-     *
-     * @param mixed $value The value to render as a default.
-     * @param string $phpType The PHP type of the column (e.g. 'string', 'int').
-     * @return string The SQL snippet for the default value.
-     */
+    private function formatEnumValues(array $values): string
+    {
+        return implode(',', array_map(fn($v) => "'" . addslashes($v) . "'", $values));
+    }
+
     private function renderDefault(mixed $value, string $phpType): string
     {
         if ($value === null) {
             return '';
         }
 
+        $phpTypeLower = \strtolower($phpType);
+
+        // For ENUM and SET, the value should be a simple quoted string
+        if ($phpTypeLower === 'enum' || $phpTypeLower === 'set') {
+            return " DEFAULT '" . (string) $value . "'";
+        }
+
         // quote strings / JSON – leave numbers & booleans alone
-        $needsQuotes = match (\strtolower($phpType)) {
+        $needsQuotes = match ($phpTypeLower) {
             'string', 'text', 'char', 'uuid', 'json', 'simple_json',
-            'array', 'simple_array', 'enum', 'set' => true,
+            'array', 'simple_array' => true,
             default => false,
         };
 
@@ -604,5 +600,4 @@ SQL;
 
         return " DEFAULT {$literal}";
     }
-
 }
