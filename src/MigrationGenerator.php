@@ -80,6 +80,28 @@ PHP;
 
         $seenEntityTables = [];
         $seenJoinTables   = [];
+        
+        // First pass: collect primary key types for each entity
+        $primaryKeyTypes = [];
+        foreach ($entities as $entityFqcn) {
+            $ref = $entityFqcn instanceof \ReflectionClass ? $entityFqcn : new \ReflectionClass($entityFqcn);
+            $table = strtolower($ref->getShortName());
+            
+            foreach ($ref->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
+                $attrs = $prop->getAttributes(FieldAttr::class);
+                if ($attrs) {
+                    $attr = $attrs[0]->newInstance();
+                    if ($attr->primaryKey) {
+                        $primaryKeyTypes[$table] = $attr->type ?? 'int';
+                        break;
+                    }
+                }
+            }
+            // Default to int if no primary key found
+            if (!isset($primaryKeyTypes[$table])) {
+                $primaryKeyTypes[$table] = 'int';
+            }
+        }
 
         foreach ($entities as $entityFqcn) {
             $ref   = $entityFqcn instanceof \ReflectionClass ? $entityFqcn : new \ReflectionClass($entityFqcn);
@@ -133,7 +155,7 @@ SQL;
                     $skipCols[] = $propName;
                 }
 
-                // Many-to-One owning side: FK col honours nullable
+                // Many-to-One owning side: FK col honours nullable AND type
                 if ($prop->getAttributes(ManyToOne::class)) {
                     $m2o   = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
                     $fkCol = $propName . '_id';
@@ -141,14 +163,19 @@ SQL;
 
                     if (!in_array($fkCol, $existingCols, true)) {
                         $null = $m2o->nullable ? ' NULL' : ' NOT NULL';
-                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` INT{$null}";
-                        $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$this->snake($m2o->targetEntity)}`(`id`)" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
+                        $targetTable = $this->snake($m2o->targetEntity);
+                        $fkType = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid' 
+                            ? 'CHAR(36)' 
+                            : 'INT';
+                        
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` {$fkType}{$null}";
+                        $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$targetTable}`(`id`)" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
                     }
                     $skipCols[] = $propName;
                     continue;
                 }
 
-                // One-to-One owning side (no mappedBy): FK col honours nullable
+                // One-to-One owning side (no mappedBy): FK col honours nullable AND type
                 if ($prop->getAttributes(OneToOne::class)) {
                     $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                     if (!$o2o->mappedBy) {
@@ -157,8 +184,13 @@ SQL;
 
                         if (!in_array($fkCol, $existingCols, true)) {
                             $null = $o2o->nullable ? ' NULL' : ' NOT NULL';
-                            $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` INT{$null}";
-                            $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$this->snake($o2o->targetEntity)}`(`id`)" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
+                            $targetTable = $this->snake($o2o->targetEntity);
+                            $fkType = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid' 
+                                ? 'CHAR(36)' 
+                                : 'INT';
+                            
+                            $alterStmts[] = "ALTER TABLE `{$table}` ADD COLUMN `{$fkCol}` {$fkType}{$null}";
+                            $alterStmts[] = "ALTER TABLE `{$table}` ADD CONSTRAINT `fk_{$table}_{$fkCol}` FOREIGN KEY (`{$fkCol}`) REFERENCES `{$targetTable}`(`id`)" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
                         }
                         $skipCols[] = $propName;
                         continue;
@@ -388,6 +420,19 @@ SQL;
     private function getColumnDefinitions(ReflectionClass $ref): array
     {
         $defs = [];
+        
+        // First pass: detect primary key type
+        $primaryKeyType = 'int';
+        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            $attrs = $prop->getAttributes(FieldAttr::class);
+            if ($attrs) {
+                $attr = $attrs[0]->newInstance();
+                if ($attr->primaryKey) {
+                    $primaryKeyType = $attr->type ?? 'int';
+                    break;
+                }
+            }
+        }
 
         foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
             $name = $prop->getName();
@@ -402,22 +447,54 @@ SQL;
                 continue;
             }
 
-            /* Many-to-One owning side → FK column */
+            /* Many-to-One owning side → FK column with correct type */
             if ($prop->getAttributes(ManyToOne::class)) {
                 $m2o      = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
                 $colName  = $name . '_id';
                 $nullable = $m2o->nullable ? ' NULL' : ' NOT NULL';
-                $defs[$colName] = "`{$colName}` INT{$nullable}";
+                
+                // Determine FK type based on target entity's primary key
+                $targetClass = new \ReflectionClass($m2o->targetEntity);
+                $targetPkType = 'int';
+                foreach ($targetClass->getProperties() as $targetProp) {
+                    $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
+                    if ($targetAttrs) {
+                        $targetAttr = $targetAttrs[0]->newInstance();
+                        if ($targetAttr->primaryKey) {
+                            $targetPkType = $targetAttr->type ?? 'int';
+                            break;
+                        }
+                    }
+                }
+                
+                $fkType = $targetPkType === 'uuid' ? 'CHAR(36)' : 'INT';
+                $defs[$colName] = "`{$colName}` {$fkType}{$nullable}";
                 continue;
             }
 
-            /* One-to-One owning side → FK column */
+            /* One-to-One owning side → FK column with correct type */
             if ($prop->getAttributes(OneToOne::class)) {
                 $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                 if (!$o2o->mappedBy) {
                     $colName  = $name . '_id';
                     $nullable = $o2o->nullable ? ' NULL' : ' NOT NULL';
-                    $defs[$colName] = "`{$colName}` INT{$nullable}";
+                    
+                    // Determine FK type based on target entity's primary key
+                    $targetClass = new \ReflectionClass($o2o->targetEntity);
+                    $targetPkType = 'int';
+                    foreach ($targetClass->getProperties() as $targetProp) {
+                        $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
+                        if ($targetAttrs) {
+                            $targetAttr = $targetAttrs[0]->newInstance();
+                            if ($targetAttr->primaryKey) {
+                                $targetPkType = $targetAttr->type ?? 'int';
+                                break;
+                            }
+                        }
+                    }
+                    
+                    $fkType = $targetPkType === 'uuid' ? 'CHAR(36)' : 'INT';
+                    $defs[$colName] = "`{$colName}` {$fkType}{$nullable}";
                     continue;
                 }
             }
