@@ -8,6 +8,7 @@ use DateTimeImmutable;
 use MonkeysLegion\Database\Contracts\ConnectionInterface;
 use MonkeysLegion\Entity\Attributes\Column as ColumnAttr;
 use MonkeysLegion\Entity\Attributes\Field as FieldAttr;
+use MonkeysLegion\Entity\Attributes\Id as IdAttr;
 use MonkeysLegion\Entity\Attributes\JoinTable;
 use MonkeysLegion\Entity\Attributes\ManyToMany;
 use MonkeysLegion\Entity\Attributes\ManyToOne;
@@ -108,17 +109,32 @@ PHP;
         $seenEntityTables = [];
         $seenJoinTables   = [];
 
-        // First pass: collect primary key types for each entity
+        // First pass: collect primary key types and names for each entity
         $primaryKeyTypes = [];
+        $primaryKeyNames = [];
         foreach ($entities as $entityFqcn) {
             $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
             $table = strtolower($ref->getShortName());
 
             foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+                // Prefer #[Id] attribute for PK detection
+                if ($prop->getAttributes(IdAttr::class)) {
+                    $primaryKeyNames[$table] = $prop->getName();
+                    $fieldAttrs = $prop->getAttributes(FieldAttr::class);
+                    if ($fieldAttrs) {
+                        $fa = $fieldAttrs[0]->newInstance();
+                        $primaryKeyTypes[$table] = $fa->type ?? 'int';
+                    } else {
+                        $primaryKeyTypes[$table] = 'int';
+                    }
+                    break;
+                }
+                // Fallback: #[Field(primaryKey: true)]
                 $attrs = $prop->getAttributes(FieldAttr::class);
                 if ($attrs) {
                     $attr = $attrs[0]->newInstance();
                     if ($attr->primaryKey) {
+                        $primaryKeyNames[$table] = $prop->getName();
                         $primaryKeyTypes[$table] = $attr->type ?? 'int';
                         break;
                     }
@@ -126,6 +142,9 @@ PHP;
             }
             if (!isset($primaryKeyTypes[$table])) {
                 $primaryKeyTypes[$table] = 'int';
+            }
+            if (!isset($primaryKeyNames[$table])) {
+                $primaryKeyNames[$table] = 'id';
             }
         }
 
@@ -150,14 +169,16 @@ PHP;
                             $jt = $meta->joinTable;
                             $seenJoinTables[$jt->name] = true;
                             $targetTable = $this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '');
+                            $ownerPk  = $primaryKeyNames[$table] ?? 'id';
+                            $targetPk = $primaryKeyNames[$targetTable] ?? 'id';
 
                             $joinTableStmts[$jt->name] =
                                 "CREATE TABLE IF NOT EXISTS {$q($jt->name)} (\n"
                                 . "    {$q($jt->joinColumn)} INT NOT NULL,\n"
                                 . "    {$q($jt->inverseColumn)} INT NOT NULL,\n"
                                 . "    PRIMARY KEY ({$q($jt->joinColumn)}, {$q($jt->inverseColumn)}),\n"
-                                . "    FOREIGN KEY ({$q($jt->joinColumn)})   REFERENCES {$q($table)}({$q('id')})   ON DELETE CASCADE,\n"
-                                . "    FOREIGN KEY ({$q($jt->inverseColumn)}) REFERENCES {$q($targetTable)}({$q('id')}) ON DELETE CASCADE\n"
+                                . "    FOREIGN KEY ({$q($jt->joinColumn)})   REFERENCES {$q($table)}({$q($ownerPk)})   ON DELETE CASCADE,\n"
+                                . "    FOREIGN KEY ({$q($jt->inverseColumn)}) REFERENCES {$q($targetTable)}({$q($targetPk)}) ON DELETE CASCADE\n"
                                 . ")" . $this->dialect->engineSuffix() . ";";
                         }
                     }
@@ -167,7 +188,8 @@ PHP;
 
             $existingCols = array_keys($schema[$table] ?? []);
             $skipCols     = [];
-            $expectedCols = ['id' => true];
+            $pkName       = $primaryKeyNames[$table] ?? 'id';
+            $expectedCols = [$pkName => true];
 
             foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
                 $propName = $prop->getName();
@@ -180,14 +202,16 @@ PHP;
                         $jt = $meta->joinTable;
                         $seenJoinTables[$jt->name] = true;
                         $targetTable = $this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '');
+                        $ownerPk  = $primaryKeyNames[$table] ?? 'id';
+                        $targetPk = $primaryKeyNames[$targetTable] ?? 'id';
 
                         $joinTableStmts[$jt->name] =
                             "CREATE TABLE IF NOT EXISTS {$q($jt->name)} (\n"
                             . "    {$q($jt->joinColumn)} INT NOT NULL,\n"
                             . "    {$q($jt->inverseColumn)} INT NOT NULL,\n"
                             . "    PRIMARY KEY ({$q($jt->joinColumn)}, {$q($jt->inverseColumn)}),\n"
-                            . "    FOREIGN KEY ({$q($jt->joinColumn)})   REFERENCES {$q($table)}({$q('id')})   ON DELETE CASCADE,\n"
-                            . "    FOREIGN KEY ({$q($jt->inverseColumn)}) REFERENCES {$q($targetTable)}({$q('id')}) ON DELETE CASCADE\n"
+                            . "    FOREIGN KEY ({$q($jt->joinColumn)})   REFERENCES {$q($table)}({$q($ownerPk)})   ON DELETE CASCADE,\n"
+                            . "    FOREIGN KEY ({$q($jt->inverseColumn)}) REFERENCES {$q($targetTable)}({$q($targetPk)}) ON DELETE CASCADE\n"
                             . ")" . $this->dialect->engineSuffix() . ";";
                     }
                     $skipCols[] = $propName;
@@ -210,17 +234,25 @@ PHP;
                 if ($prop->getAttributes(ManyToOne::class)) {
                     $m2o   = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
                     $fkCol = str_ends_with($propName, '_id') ? $propName : $propName . '_id';
+
+                    // If this FK column is also the PK, don't re-add it (shared PK/FK pattern)
+                    if ($fkCol === $pkName) {
+                        $skipCols[] = $propName;
+                        continue;
+                    }
+
                     $expectedCols[$fkCol] = true;
 
                     if (!in_array($fkCol, $existingCols, true)) {
                         $null        = $m2o->nullable ? ' NULL' : ' NOT NULL';
                         $targetTable = $this->snake($m2o->targetEntity);
+                        $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
                         $fkType      = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
                             ? $this->dialect->uuidFkType()
                             : $this->dialect->intFkType();
 
                         $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($fkCol)} {$fkType}{$null}";
-                        $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q('id')})" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
+                        $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q($targetPk)})" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
                     }
                     $skipCols[] = $propName;
                     continue;
@@ -231,26 +263,34 @@ PHP;
                     $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                     if (!$o2o->mappedBy) {
                         $fkCol = str_ends_with($propName, '_id') ? $propName : $propName . '_id';
+
+                        // If this FK column is also the PK, don't re-add it (shared PK/FK pattern)
+                        if ($fkCol === $pkName) {
+                            $skipCols[] = $propName;
+                            continue;
+                        }
+
                         $expectedCols[$fkCol] = true;
 
                         if (!in_array($fkCol, $existingCols, true)) {
                             $null        = $o2o->nullable ? ' NULL' : ' NOT NULL';
                             $targetTable = $this->snake($o2o->targetEntity);
+                            $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
                             $fkType      = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
                                 ? $this->dialect->uuidFkType()
                                 : $this->dialect->intFkType();
 
                             $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($fkCol)} {$fkType}{$null}";
-                            $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q('id')})" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
+                            $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q($targetPk)})" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
                         }
                         $skipCols[] = $propName;
                         continue;
                     }
                 }
 
-                // Primary key
-                if ($propName === 'id') {
-                    $expectedCols['id'] = true;
+                // Primary key — skip (already in $expectedCols)
+                if ($propName === $pkName) {
+                    $expectedCols[$pkName] = true;
                     continue;
                 }
 
@@ -315,7 +355,7 @@ PHP;
 
             // ➋ DROP logic: anything in $existingCols not in $expectedCols should be dropped.
             foreach ($existingCols as $col) {
-                if ($col === 'id') continue;
+                if ($col === $pkName) continue;
                 if (!isset($expectedCols[$col])) {
                     if (str_ends_with($col, '_id')) {
                         $fkName = $this->fkName($table, $col);
@@ -386,9 +426,13 @@ PHP;
         $cols = $this->getColumnDefinitions($ref);
         $defs = implode(",\n  ", $cols);
 
-        // Find primary key from Field attributes
+        // Find primary key via #[Id] attribute, fallback to #[Field(primaryKey:true)]
         $primaryKey = 'id'; // default fallback
         foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            if ($prop->getAttributes(IdAttr::class)) {
+                $primaryKey = $prop->getName();
+                break;
+            }
             $attrs = $prop->getAttributes(FieldAttr::class);
             if ($attrs) {
                 $attr = $attrs[0]->newInstance();
@@ -418,13 +462,23 @@ SQL;
         $q    = fn(string $id): string => $this->dialect->quoteIdentifier($id);
         $defs = [];
 
-        // First pass: detect primary key type
+        // First pass: detect primary key name and type
         $primaryKeyType = 'int';
+        $primaryKeyName = 'id';
         foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            if ($prop->getAttributes(IdAttr::class)) {
+                $primaryKeyName = $prop->getName();
+                $fieldAttrs = $prop->getAttributes(FieldAttr::class);
+                if ($fieldAttrs) {
+                    $primaryKeyType = $fieldAttrs[0]->newInstance()->type ?? 'int';
+                }
+                break;
+            }
             $attrs = $prop->getAttributes(FieldAttr::class);
             if ($attrs) {
                 $attr = $attrs[0]->newInstance();
                 if ($attr->primaryKey) {
+                    $primaryKeyName = $prop->getName();
                     $primaryKeyType = $attr->type ?? 'int';
                     break;
                 }
@@ -448,11 +502,23 @@ SQL;
             if ($prop->getAttributes(ManyToOne::class)) {
                 $m2o      = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
                 $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
+
+                // Skip if this FK column is the PK (shared PK/FK pattern);
+                // the PK will be emitted by the #[Field] handler below.
+                if ($colName === $primaryKeyName) {
+                    continue;
+                }
+
                 $nullable = $m2o->nullable ? ' NULL' : ' NOT NULL';
 
                 $targetClass  = new ReflectionClass($m2o->targetEntity);
                 $targetPkType = 'int';
                 foreach ($targetClass->getProperties() as $targetProp) {
+                    if ($targetProp->getAttributes(IdAttr::class)) {
+                        $fa = $targetProp->getAttributes(FieldAttr::class);
+                        $targetPkType = $fa ? ($fa[0]->newInstance()->type ?? 'int') : 'int';
+                        break;
+                    }
                     $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
                     if ($targetAttrs) {
                         $targetAttr = $targetAttrs[0]->newInstance();
@@ -475,11 +541,22 @@ SQL;
                 $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                 if (!$o2o->mappedBy) {
                     $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
+
+                    // Skip if this FK column is the PK (shared PK/FK pattern)
+                    if ($colName === $primaryKeyName) {
+                        continue;
+                    }
+
                     $nullable = $o2o->nullable ? ' NULL' : ' NOT NULL';
 
                     $targetClass  = new ReflectionClass($o2o->targetEntity);
                     $targetPkType = 'int';
                     foreach ($targetClass->getProperties() as $targetProp) {
+                        if ($targetProp->getAttributes(IdAttr::class)) {
+                            $fa = $targetProp->getAttributes(FieldAttr::class);
+                            $targetPkType = $fa ? ($fa[0]->newInstance()->type ?? 'int') : 'int';
+                            break;
+                        }
                         $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
                         if ($targetAttrs) {
                             $targetAttr = $targetAttrs[0]->newInstance();
