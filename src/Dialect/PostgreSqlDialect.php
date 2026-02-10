@@ -21,9 +21,9 @@ namespace MonkeysLegion\Migration\Dialect;
  *  - JSONB instead of JSON
  *  - SMALLINT instead of TINYINT
  *  - no ENGINE=… suffix
- *  - ALTER COLUMN … TYPE instead of MODIFY COLUMN
+ *  - ALTER COLUMN … TYPE / SET NOT NULL / SET DEFAULT instead of MODIFY COLUMN
  *  - DROP CONSTRAINT instead of DROP FOREIGN KEY
- *  - session_replication_role for FK-check toggling
+ *  - no FK-check toggling needed (PG DDL is transactional)
  */
 final class PostgreSqlDialect implements SqlDialect
 {
@@ -123,17 +123,40 @@ SQL;
 
     public function disableFkChecks(): string
     {
-        return "SET session_replication_role = 'replica';";
+        // PG DDL is transactional — no superuser-only toggle needed.
+        // If the migration runner wraps in a transaction, failures simply roll back.
+        return '';
     }
 
     public function enableFkChecks(): string
     {
-        return "SET session_replication_role = 'origin';";
+        return '';
     }
 
-    public function alterColumnSql(string $table, string $column, string $typeDef): string
-    {
-        return "ALTER TABLE \"{$table}\" ALTER COLUMN \"{$column}\" TYPE {$typeDef}";
+    public function alterColumnSql(
+        string $table,
+        string $column,
+        string $baseType,
+        bool   $nullable,
+        string $defaultClause,
+    ): string {
+        // PG requires separate sub-clauses inside one ALTER TABLE:
+        //   ALTER COLUMN "c" TYPE <type>,
+        //   ALTER COLUMN "c" SET/DROP NOT NULL
+        //   [, ALTER COLUMN "c" SET/DROP DEFAULT …]
+        $parts   = [];
+        $parts[] = "ALTER COLUMN \"{$column}\" TYPE {$baseType}";
+        $parts[] = $nullable
+            ? "ALTER COLUMN \"{$column}\" DROP NOT NULL"
+            : "ALTER COLUMN \"{$column}\" SET NOT NULL";
+
+        if ($defaultClause !== '') {
+            // $defaultClause arrives as " DEFAULT <value>"; extract the value.
+            $defaultValue = preg_replace('/^\s*DEFAULT\s+/i', '', $defaultClause);
+            $parts[] = "ALTER COLUMN \"{$column}\" SET DEFAULT {$defaultValue}";
+        }
+
+        return "ALTER TABLE \"{$table}\" " . implode(', ', $parts);
     }
 
     public function dropForeignKeySql(string $table, string $fkName): string

@@ -110,9 +110,15 @@ SQL;
         return 'SET FOREIGN_KEY_CHECKS=1;';
     }
 
-    public function alterColumnSql(string $table, string $column, string $typeDef): string
-    {
-        return "ALTER TABLE `{$table}` MODIFY COLUMN `{$column}` {$typeDef}";
+    public function alterColumnSql(
+        string $table,
+        string $column,
+        string $baseType,
+        bool   $nullable,
+        string $defaultClause,
+    ): string {
+        $null = $nullable ? ' NULL' : ' NOT NULL';
+        return "ALTER TABLE `{$table}` MODIFY COLUMN `{$column}` {$baseType}{$null}{$defaultClause}";
     }
 
     public function dropForeignKeySql(string $table, string $fkName): string

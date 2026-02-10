@@ -253,7 +253,14 @@ PHP;
                             || $wantBase     !== $haveBase
                             || $wantDefault  !== $haveDefault
                         ) {
-                            $alterStmts[] = $this->dialect->alterColumnSql($table, $propName, $wantSql);
+                            $defaultClause = $this->renderDefault($wantDefault, $field->type ?? 'string');
+                            $alterStmts[] = $this->dialect->alterColumnSql(
+                                $table,
+                                $propName,
+                                $wantBase,
+                                $wantNullable,
+                                $defaultClause,
+                            );
                         }
                     }
                 }
@@ -306,13 +313,18 @@ PHP;
             }
         }
 
-        // Compose final SQL with FK-check guard if we have drops
+        // Compose final SQL with FK-check guard if dialect supports it
+        $disableFk = $this->dialect->disableFkChecks();
+        $enableFk  = $this->dialect->enableFkChecks();
+
         $sql = implode(";\n", $alterStmts);
         if ($sql !== '') {
             if (!str_ends_with($sql, ';')) {
                 $sql .= ';';
             }
-            $sql = $this->dialect->disableFkChecks() . "\n{$sql}\n" . $this->dialect->enableFkChecks();
+            if ($disableFk !== '' && $enableFk !== '') {
+                $sql = "{$disableFk}\n{$sql}\n{$enableFk}";
+            }
         }
         if ($joinTableStmts) {
             $sql .= ($sql ? "\n\n" : '') . implode("\n", $joinTableStmts);
@@ -323,8 +335,10 @@ PHP;
                 $drops .= ';';
             }
 
-            $guard = $this->dialect->disableFkChecks() . "\n{$drops}\n" . $this->dialect->enableFkChecks();
-            $sql  .= ($sql ? "\n\n" : '') . $guard;
+            if ($disableFk !== '' && $enableFk !== '') {
+                $drops = "{$disableFk}\n{$drops}\n{$enableFk}";
+            }
+            $sql .= ($sql ? "\n\n" : '') . $drops;
         }
 
         return rtrim($sql, ";\n") . ';';

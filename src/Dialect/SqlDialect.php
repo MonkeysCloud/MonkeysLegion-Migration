@@ -63,8 +63,24 @@ interface SqlDialect
     /** Statement to re-enable FK checks. */
     public function enableFkChecks(): string;
 
-    /** Generate ALTER … to change a column's type definition. */
-    public function alterColumnSql(string $table, string $column, string $typeDef): string;
+    /**
+     * Generate ALTER … to change a column's type, nullability, and/or default.
+     *
+     * Each dialect composes these parts using its own syntax:
+     *   MySQL  → ALTER TABLE `t` MODIFY COLUMN `c` <type> <null> <default>
+     *   PG     → ALTER TABLE "t" ALTER COLUMN "c" TYPE <type>,
+     *                            ALTER COLUMN "c" SET/DROP NOT NULL
+     *                            [, ALTER COLUMN "c" SET DEFAULT …]
+     *
+     * @param string $defaultClause  Rendered default (e.g. " DEFAULT 'x'" or "")
+     */
+    public function alterColumnSql(
+        string $table,
+        string $column,
+        string $baseType,
+        bool   $nullable,
+        string $defaultClause,
+    ): string;
 
     /** Generate ALTER … to drop a foreign key constraint. */
     public function dropForeignKeySql(string $table, string $fkName): string;
