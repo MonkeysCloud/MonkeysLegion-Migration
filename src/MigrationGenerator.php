@@ -37,7 +37,13 @@ final class MigrationGenerator
 
         $this->dialect = match ($this->driver) {
             'pgsql' => new PostgreSqlDialect(),
-            default => new MySqlDialect(),
+            'mysql' => new MySqlDialect(),
+            default => throw new \RuntimeException(
+                sprintf(
+                    "Unsupported PDO driver '%s'. Supported drivers: 'mysql', 'pgsql'.",
+                    $this->driver,
+                ),
+            ),
         };
     }
 
