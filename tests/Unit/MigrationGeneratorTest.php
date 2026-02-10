@@ -409,4 +409,123 @@ final class MigrationGeneratorTest extends TestCase
 
         $this->assertStringNotContainsString('DROP TABLE IF EXISTS "migrations"', $sql);
     }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CASCADE for PostgreSQL DROP TABLE
+    // ═══════════════════════════════════════════════════════════════
+
+    public function testPgDropTableUsesCascade(): void
+    {
+        $gen = $this->makeGenerator('pgsql');
+
+        $schema = [
+            'userentity' => [
+                'id'        => ['Field' => 'id', 'type' => 'uuid'],
+                'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
+                'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
+                'is_active' => ['Field' => 'is_active', 'type' => 'boolean'],
+                'enabled'   => ['Field' => 'enabled', 'type' => 'boolean'],
+            ],
+            'jobs' => [
+                'id' => ['Field' => 'id', 'type' => 'int'],
+            ],
+        ];
+
+        $sql = $gen->diff([UserEntity::class], $schema);
+
+        $this->assertStringContainsString('DROP TABLE IF EXISTS "jobs" CASCADE', $sql);
+    }
+
+    public function testMysqlDropTableDoesNotUseCascade(): void
+    {
+        $gen = $this->makeGenerator('mysql');
+
+        $schema = [
+            'userentity' => [
+                'id'        => ['Field' => 'id', 'type' => 'uuid'],
+                'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
+                'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
+                'is_active' => ['Field' => 'is_active', 'type' => 'boolean'],
+                'enabled'   => ['Field' => 'enabled', 'type' => 'boolean'],
+            ],
+            'jobs' => [
+                'id' => ['Field' => 'id', 'type' => 'int'],
+            ],
+        ];
+
+        $sql = $gen->diff([UserEntity::class], $schema);
+
+        $this->assertStringContainsString('DROP TABLE IF EXISTS `jobs`', $sql);
+        $this->assertStringNotContainsString('CASCADE', $sql);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // CASCADE for PostgreSQL DROP COLUMN
+    // ═══════════════════════════════════════════════════════════════
+
+    public function testPgDropColumnUsesCascade(): void
+    {
+        $gen = $this->makeGenerator('pgsql');
+
+        $schema = [
+            'userentity' => [
+                'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
+                'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
+                'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
+                'is_active'    => ['Field' => 'is_active', 'type' => 'boolean', 'nullable' => false, 'default' => null],
+                'enabled'      => ['Field' => 'enabled', 'type' => 'boolean', 'nullable' => false, 'default' => null],
+                'old_column'   => ['Field' => 'old_column', 'type' => 'string', 'length' => 255, 'nullable' => true, 'default' => null],
+            ],
+        ];
+
+        $sql = $gen->diff([UserEntity::class], $schema);
+
+        $this->assertStringContainsString('DROP COLUMN "old_column" CASCADE', $sql);
+    }
+
+    public function testMysqlDropColumnDoesNotUseCascade(): void
+    {
+        $gen = $this->makeGenerator('mysql');
+
+        $schema = [
+            'userentity' => [
+                'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
+                'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
+                'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
+                'is_active'    => ['Field' => 'is_active', 'type' => 'boolean', 'nullable' => false, 'default' => null],
+                'enabled'      => ['Field' => 'enabled', 'type' => 'boolean', 'nullable' => false, 'default' => null],
+                'old_column'   => ['Field' => 'old_column', 'type' => 'string', 'length' => 255, 'nullable' => true, 'default' => null],
+            ],
+        ];
+
+        $sql = $gen->diff([UserEntity::class], $schema);
+
+        $this->assertStringContainsString('DROP COLUMN `old_column`', $sql);
+        $this->assertStringNotContainsString('CASCADE', $sql);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Statement ordering: DROPs come after CREATEs/ALTERs
+    // ═══════════════════════════════════════════════════════════════
+
+    public function testDropStatementsAppearAfterCreates(): void
+    {
+        $gen = $this->makeGenerator('pgsql');
+
+        // New entity + orphan table → CREATE should precede DROP
+        $schema = [
+            'obsolete_table' => [
+                'id' => ['Field' => 'id', 'type' => 'int'],
+            ],
+        ];
+
+        $sql = $gen->diff([UserEntity::class], $schema);
+
+        $createPos = strpos($sql, 'CREATE TABLE');
+        $dropPos   = strpos($sql, 'DROP TABLE');
+
+        $this->assertNotFalse($createPos);
+        $this->assertNotFalse($dropPos);
+        $this->assertGreaterThan($createPos, $dropPos, 'DROP TABLE should appear after CREATE TABLE');
+    }
 }

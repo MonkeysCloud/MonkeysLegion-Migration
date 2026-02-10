@@ -363,7 +363,8 @@ PHP;
                             $alterStmts[] = $this->dialect->dropForeignKeySql($table, $fkName);
                         }
                     }
-                    $alterStmts[] = "ALTER TABLE {$q($table)} DROP COLUMN {$q($col)}";
+                    $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
+                    $alterStmts[] = "ALTER TABLE {$q($table)} DROP COLUMN {$q($col)}{$cascade}";
                 }
             }
         }
@@ -380,39 +381,51 @@ PHP;
             $isJoinExpected   = isset($seenJoinTables[$tbl]);
 
             if (! $isEntityExpected && ! $isJoinExpected) {
-                $dropStmts[] = "DROP TABLE IF EXISTS {$q($tbl)}";
+                $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
+                $dropStmts[] = "DROP TABLE IF EXISTS {$q($tbl)}{$cascade}";
             }
         }
 
-        // Compose final SQL with FK-check guard if dialect supports it
+        // Compose final SQL — order: CREATE/ALTER first, JOIN tables, then DROPs last.
+        // This ensures new tables and FK constraints are created before
+        // orphaned tables are dropped (important with CASCADE on PG).
         $disableFk = $this->dialect->disableFkChecks();
         $enableFk  = $this->dialect->enableFkChecks();
 
-        $sql = implode(";\n", $alterStmts);
-        if ($sql !== '') {
-            if (!str_ends_with($sql, ';')) {
-                $sql .= ';';
+        $parts = [];
+
+        // ① CREATE + ALTER statements
+        if ($alterStmts) {
+            $alterSql = implode(";\n", $alterStmts);
+            if (!str_ends_with($alterSql, ';')) {
+                $alterSql .= ';';
             }
             if ($disableFk !== '' && $enableFk !== '') {
-                $sql = "{$disableFk}\n{$sql}\n{$enableFk}";
+                $alterSql = "{$disableFk}\n{$alterSql}\n{$enableFk}";
             }
+            $parts[] = $alterSql;
         }
+
+        // ② JOIN table creates
         if ($joinTableStmts) {
-            $sql .= ($sql ? "\n\n" : '') . implode("\n", $joinTableStmts);
+            $parts[] = implode("\n", $joinTableStmts);
         }
+
+        // ③ DROP statements (always last)
         if ($dropStmts) {
-            $drops = implode(";\n", $dropStmts);
-            if (!str_ends_with($drops, ';')) {
-                $drops .= ';';
+            $dropSql = implode(";\n", $dropStmts);
+            if (!str_ends_with($dropSql, ';')) {
+                $dropSql .= ';';
             }
-
             if ($disableFk !== '' && $enableFk !== '') {
-                $drops = "{$disableFk}\n{$drops}\n{$enableFk}";
+                $dropSql = "{$disableFk}\n{$dropSql}\n{$enableFk}";
             }
-            $sql .= ($sql ? "\n\n" : '') . $drops;
+            $parts[] = $dropSql;
         }
 
-        return rtrim($sql, ";\n") . ';';
+        $sql = implode("\n\n", $parts);
+
+        return $sql === '' ? '' : rtrim($sql, ";\n") . ';';
     }
 
     // ─── private helpers ────────────────────────────────────────────
@@ -636,10 +649,11 @@ SQL;
         $idPat = '[`"](\w+)[`"]';
 
         foreach ($lines as $line) {
+            $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
             if (preg_match('/^CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+' . $idPat . '/i', $line, $m)) {
-                $out[] = "DROP TABLE IF EXISTS {$q($m[1])};";
+                $out[] = "DROP TABLE IF EXISTS {$q($m[1])}{$cascade};";
             } elseif (preg_match('/^ALTER\s+TABLE\s+' . $idPat . '\s+ADD\s+COLUMN\s+' . $idPat . '/i', $line, $m)) {
-                $out[] = "ALTER TABLE {$q($m[1])} DROP COLUMN {$q($m[2])};";
+                $out[] = "ALTER TABLE {$q($m[1])} DROP COLUMN {$q($m[2])}{$cascade};";
             } else {
                 $out[] = "-- TODO reverse: {$line}";
             }
