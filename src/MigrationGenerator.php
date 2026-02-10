@@ -137,7 +137,32 @@ PHP;
 
             if (!isset($schema[$table])) {
                 $alterStmts[] = $this->createTableSql($ref, $table);
-                $schema[$table] = [];
+                // Mark table as seen; skip per-column diff — CREATE TABLE
+                // already includes every column.
+                $schema[$table] = ['__new__' => true];
+                $seenEntityTables[$table] = true;
+
+                // Still need to process ManyToMany join tables for this entity
+                foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+                    foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
+                        $meta = $attr->newInstance();
+                        if ($meta->joinTable instanceof JoinTable) {
+                            $jt = $meta->joinTable;
+                            $seenJoinTables[$jt->name] = true;
+                            $targetTable = $this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '');
+
+                            $joinTableStmts[$jt->name] =
+                                "CREATE TABLE IF NOT EXISTS {$q($jt->name)} (\n"
+                                . "    {$q($jt->joinColumn)} INT NOT NULL,\n"
+                                . "    {$q($jt->inverseColumn)} INT NOT NULL,\n"
+                                . "    PRIMARY KEY ({$q($jt->joinColumn)}, {$q($jt->inverseColumn)}),\n"
+                                . "    FOREIGN KEY ({$q($jt->joinColumn)})   REFERENCES {$q($table)}({$q('id')})   ON DELETE CASCADE,\n"
+                                . "    FOREIGN KEY ({$q($jt->inverseColumn)}) REFERENCES {$q($targetTable)}({$q('id')}) ON DELETE CASCADE\n"
+                                . ")" . $this->dialect->engineSuffix() . ";";
+                        }
+                    }
+                }
+                continue; // skip per-column diff for this newly created table
             }
 
             $existingCols = array_keys($schema[$table] ?? []);
@@ -184,7 +209,7 @@ PHP;
                 // Many-to-One owning side: FK col honours nullable AND type
                 if ($prop->getAttributes(ManyToOne::class)) {
                     $m2o   = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
-                    $fkCol = $propName . '_id';
+                    $fkCol = str_ends_with($propName, '_id') ? $propName : $propName . '_id';
                     $expectedCols[$fkCol] = true;
 
                     if (!in_array($fkCol, $existingCols, true)) {
@@ -205,7 +230,7 @@ PHP;
                 if ($prop->getAttributes(OneToOne::class)) {
                     $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                     if (!$o2o->mappedBy) {
-                        $fkCol = $propName . '_id';
+                        $fkCol = str_ends_with($propName, '_id') ? $propName : $propName . '_id';
                         $expectedCols[$fkCol] = true;
 
                         if (!in_array($fkCol, $existingCols, true)) {
@@ -381,7 +406,7 @@ PHP;
 CREATE TABLE {$q($table)} (
   {$defs},
   PRIMARY KEY ({$q($primaryKey)})
-){$suffix};
+){$suffix}
 SQL;
     }
 
@@ -422,7 +447,7 @@ SQL;
             /* Many-to-One owning side → FK column with correct type */
             if ($prop->getAttributes(ManyToOne::class)) {
                 $m2o      = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
-                $colName  = $name . '_id';
+                $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
                 $nullable = $m2o->nullable ? ' NULL' : ' NOT NULL';
 
                 $targetClass  = new ReflectionClass($m2o->targetEntity);
@@ -449,7 +474,7 @@ SQL;
             if ($prop->getAttributes(OneToOne::class)) {
                 $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                 if (!$o2o->mappedBy) {
-                    $colName  = $name . '_id';
+                    $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
                     $nullable = $o2o->nullable ? ' NULL' : ' NOT NULL';
 
                     $targetClass  = new ReflectionClass($o2o->targetEntity);
@@ -589,6 +614,11 @@ SQL;
         }
 
         $phpTypeLower = strtolower($phpType);
+
+        // Boolean: render TRUE / FALSE explicitly (handles PHP false → '' cast)
+        if ($phpTypeLower === 'boolean' || $phpTypeLower === 'bool') {
+            return ' DEFAULT ' . ($value ? 'TRUE' : 'FALSE');
+        }
 
         // For ENUM and SET, the value should be a simple quoted string
         if ($phpTypeLower === 'enum' || $phpTypeLower === 'set') {
