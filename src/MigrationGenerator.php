@@ -7,6 +7,7 @@ namespace MonkeysLegion\Migration;
 use DateTimeImmutable;
 use MonkeysLegion\Database\Contracts\ConnectionInterface;
 use MonkeysLegion\Entity\Attributes\Column as ColumnAttr;
+use MonkeysLegion\Entity\Attributes\Entity;
 use MonkeysLegion\Entity\Attributes\Field as FieldAttr;
 use MonkeysLegion\Entity\Attributes\Id as IdAttr;
 use MonkeysLegion\Entity\Attributes\JoinTable;
@@ -149,8 +150,18 @@ PHP;
         }
 
         foreach ($entities as $entityFqcn) {
-            $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
-            $table = strtolower($ref->getShortName());
+            $ref = $entityFqcn instanceof ReflectionClass
+                ? $entityFqcn
+                : new ReflectionClass($entityFqcn);
+
+            $attributes = $ref->getAttributes(Entity::class);
+
+            if (!empty($attributes)) {
+                $entityAttr = $attributes[0]->newInstance();
+                $table = $entityAttr->table;
+            } else {
+                $table = strtolower($ref->getShortName());
+            }
 
             $seenEntityTables[$table] = true;
 
