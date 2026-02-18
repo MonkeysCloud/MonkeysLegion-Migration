@@ -25,7 +25,7 @@ use ReflectionProperty;
 final class MigrationGenerator
 {
     /** Tables that must never be dropped automatically. */
-    private array $protectedTables = ['migrations'];
+    private array $protectedTables = ['migrations', 'ml_migrations'];
 
     /** Detected PDO driver name ('mysql' | 'pgsql'). */
     private string $driver;
@@ -113,9 +113,18 @@ PHP;
         // First pass: collect primary key types and names for each entity
         $primaryKeyTypes = [];
         $primaryKeyNames = [];
+        $entityTableMap  = [];
         foreach ($entities as $entityFqcn) {
             $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
-            $table = strtolower($ref->getShortName());
+            $attributes = $ref->getAttributes(Entity::class);
+
+            if (!empty($attributes)) {
+                $entityAttr = $attributes[0]->newInstance();
+                $table = $entityAttr->table;
+            } else {
+                $table = strtolower($ref->getShortName());
+            }
+            $entityTableMap[is_string($entityFqcn) ? $entityFqcn : $ref->getName()] = $table;
 
             foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
                 // Prefer #[Id] attribute for PK detection
@@ -256,7 +265,7 @@ PHP;
 
                     if (!in_array($fkCol, $existingCols, true)) {
                         $null        = $m2o->nullable ? ' NULL' : ' NOT NULL';
-                        $targetTable = $this->snake($m2o->targetEntity);
+                        $targetTable = $entityTableMap[$m2o->targetEntity] ?? $this->snake($m2o->targetEntity);
                         $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
                         $fkType      = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
                             ? $this->dialect->uuidFkType()
@@ -264,6 +273,28 @@ PHP;
 
                         $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($fkCol)} {$fkType}{$null}";
                         $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q($targetPk)})" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
+                    } else {
+                        /* FK column already exists → compare type & nullability */
+                        $colMeta      = $schema[$table][$fkCol] ?? null;
+                        $haveNullable = (bool) ($colMeta['nullable'] ?? false);
+                        $targetTable  = $entityTableMap[$m2o->targetEntity] ?? $this->snake($m2o->targetEntity);
+                        $fkType       = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
+                            ? $this->dialect->uuidFkType()
+                            : $this->dialect->intFkType();
+
+                        // mapType handles standardizing e.g. 'int' to 'INT' or 'string' to 'VARCHAR(255)'
+                        $haveBase = $this->dialect->mapType($colMeta['type'] ?? '', $colMeta['length'] ?? null);
+                        $wantBase = $fkType;
+
+                        if ($m2o->nullable !== $haveNullable || $wantBase !== $haveBase) {
+                            $alterStmts[] = $this->dialect->alterColumnSql(
+                                $table,
+                                $fkCol,
+                                $wantBase,
+                                $m2o->nullable,
+                                '', // no default for FK
+                            );
+                        }
                     }
                     $skipCols[] = $propName;
                     continue;
@@ -285,7 +316,7 @@ PHP;
 
                         if (!in_array($fkCol, $existingCols, true)) {
                             $null        = $o2o->nullable ? ' NULL' : ' NOT NULL';
-                            $targetTable = $this->snake($o2o->targetEntity);
+                            $targetTable = $entityTableMap[$o2o->targetEntity] ?? $this->snake($o2o->targetEntity);
                             $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
                             $fkType      = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
                                 ? $this->dialect->uuidFkType()
@@ -293,6 +324,27 @@ PHP;
 
                             $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($fkCol)} {$fkType}{$null}";
                             $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q($targetPk)})" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
+                        } else {
+                            /* FK column already exists → compare type & nullability */
+                            $colMeta      = $schema[$table][$fkCol] ?? null;
+                            $haveNullable = (bool) ($colMeta['nullable'] ?? false);
+                            $targetTable  = $entityTableMap[$o2o->targetEntity] ?? $this->snake($o2o->targetEntity);
+                            $fkType       = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
+                                ? $this->dialect->uuidFkType()
+                                : $this->dialect->intFkType();
+
+                            $haveBase = $this->dialect->mapType($colMeta['type'] ?? '', $colMeta['length'] ?? null);
+                            $wantBase = $fkType;
+
+                            if ($o2o->nullable !== $haveNullable || $wantBase !== $haveBase) {
+                                $alterStmts[] = $this->dialect->alterColumnSql(
+                                    $table,
+                                    $fkCol,
+                                    $wantBase,
+                                    $o2o->nullable,
+                                    '', // no default for FK
+                                );
+                            }
                         }
                         $skipCols[] = $propName;
                         continue;
@@ -330,10 +382,29 @@ PHP;
                         $haveBase     = $this->dialect->mapType($colMeta['type'] ?? '', $colMeta['length'] ?? null);
                         $haveDefault  = $colMeta['default'] ?? null;
 
+                        // Normalize booleans for comparison:
+                        // '0' or 0 -> false/FALSE; '1' or 1 -> true/TRUE
+                        $wantNorm = $wantDefault;
+                        $haveNorm = $haveDefault;
+
+                        if (strtolower($field->type ?? 'string') === 'boolean' || strtolower($field->type ?? 'string') === 'bool') {
+                            if ($wantDefault !== null) {
+                                $wantNorm = $wantDefault ? 'TRUE' : 'FALSE';
+                            }
+                            if ($haveDefault !== null) {
+                                // DB might return '0'/'1', 0/1, or 'true'/'false'
+                                if ($haveDefault === '0' || $haveDefault === 0 || strcasecmp((string)$haveDefault, 'false') === 0) {
+                                    $haveNorm = 'FALSE';
+                                } elseif ($haveDefault === '1' || $haveDefault === 1 || strcasecmp((string)$haveDefault, 'true') === 0) {
+                                    $haveNorm = 'TRUE';
+                                }
+                            }
+                        }
+
                         if (
                             $wantNullable !== $haveNullable
                             || $wantBase     !== $haveBase
-                            || $wantDefault  !== $haveDefault
+                            || $wantNorm     !== $haveNorm
                         ) {
                             $defaultClause = $this->renderDefault($wantDefault, $field->type ?? 'string');
                             $alterStmts[] = $this->dialect->alterColumnSql(
@@ -365,8 +436,10 @@ PHP;
             }
 
             // ➋ DROP logic: anything in $existingCols not in $expectedCols should be dropped.
+            $metadataCols = ['COLUMN_NAME', 'COLUMN_TYPE', 'IS_NULLABLE'];
             foreach ($existingCols as $col) {
                 if ($col === $pkName) continue;
+                if (in_array(strtoupper($col), $metadataCols, true)) continue;
                 if (!isset($expectedCols[$col])) {
                     if (str_ends_with($col, '_id')) {
                         $fkName = $this->fkName($table, $col);
