@@ -291,8 +291,8 @@ final class SchemaDiffer
     {
         return $desired->referencedTable !== $current->referencedTable
             || $desired->referencedColumn !== $current->referencedColumn
-            || strtoupper($desired->onDelete) !== strtoupper($current->onDelete)
-            || strtoupper($desired->onUpdate) !== strtoupper($current->onUpdate);
+            || strcasecmp($desired->onDelete, $current->onDelete) !== 0
+            || strcasecmp($desired->onUpdate, $current->onUpdate) !== 0;
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -325,6 +325,7 @@ final class SchemaDiffer
         // Build adjacency: table → [tables it depends on]
         /** @var array<string, list<string>> */
         $deps = [];
+        /** @var array<string, list<string>> reverse map: table -> dependents */
         $reverseDeps = [];
         $tableMap = [];
 
