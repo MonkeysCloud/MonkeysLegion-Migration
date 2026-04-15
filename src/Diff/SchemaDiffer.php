@@ -325,7 +325,7 @@ final class SchemaDiffer
         // Build adjacency: table → [tables it depends on]
         /** @var array<string, list<string>> */
         $deps = [];
-        /** @var array<string, list<string>> reverse map: table -> dependents */
+        /** @var array<string, list<string>> reverse map: table -> dependents. */
         $reverseDeps = [];
         $tableMap = [];
 
@@ -369,7 +369,7 @@ final class SchemaDiffer
             }
         }
 
-        for ($queueIndex = 0; $queueIndex < count($queue); $queueIndex++) {
+        for ($queueIndex = 0; isset($queue[$queueIndex]); $queueIndex++) {
             $name = $queue[$queueIndex];
             if (isset($tableMap[$name])) {
                 $sorted[] = $tableMap[$name];
