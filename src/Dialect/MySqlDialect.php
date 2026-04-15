@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Dialect;
 
+use MonkeysLegion\Migration\Security\IdentifierValidator;
+
 /**
  * MonkeysLegion Framework — Migration Package
  *
@@ -20,6 +22,8 @@ final class MySqlDialect implements SqlDialect
 
     public function quoteIdentifier(string $name): string
     {
+        IdentifierValidator::validate($name);
+
         return "`{$name}`";
     }
 
@@ -125,7 +129,7 @@ SQL;
 
     public function dropForeignKeySql(string $table, string $fkName): string
     {
-        return "ALTER TABLE `{$table}` DROP FOREIGN KEY `{$fkName}`";
+        return "ALTER TABLE {$this->quoteIdentifier($table)} DROP FOREIGN KEY {$this->quoteIdentifier($fkName)}";
     }
 
     public function uuidFkType(): string
@@ -161,19 +165,31 @@ SQL;
     ): string {
         $null = $nullable ? ' NULL' : ' NOT NULL';
 
-        return "ALTER TABLE `{$table}` MODIFY COLUMN `{$column}` {$baseType}{$null}{$defaultClause}";
+        return sprintf(
+            'ALTER TABLE %s MODIFY COLUMN %s %s%s%s',
+            $this->quoteIdentifier($table),
+            $this->quoteIdentifier($column),
+            $baseType,
+            $null,
+            $defaultClause,
+        );
     }
 
     public function renameColumnSql(string $table, string $from, string $to): string
     {
-        return "ALTER TABLE `{$table}` RENAME COLUMN `{$from}` TO `{$to}`";
+        return sprintf(
+            'ALTER TABLE %s RENAME COLUMN %s TO %s',
+            $this->quoteIdentifier($table),
+            $this->quoteIdentifier($from),
+            $this->quoteIdentifier($to),
+        );
     }
 
     // ── Index operations ───────────────────────────────────────────
 
     public function dropIndexSql(string $table, string $indexName): string
     {
-        return "DROP INDEX `{$indexName}` ON `{$table}`";
+        return "DROP INDEX {$this->quoteIdentifier($indexName)} ON {$this->quoteIdentifier($table)}";
     }
 
     // ── Transaction support ────────────────────────────────────────
@@ -189,7 +205,7 @@ SQL;
     {
         $escaped = addslashes($comment);
 
-        return "ALTER TABLE `{$table}` COMMENT = '{$escaped}'";
+        return "ALTER TABLE {$this->quoteIdentifier($table)} COMMENT = '{$escaped}'";
     }
 
     // ── Private helpers ────────────────────────────────────────────

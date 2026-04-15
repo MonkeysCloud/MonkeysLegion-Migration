@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Dialect;
 
+use MonkeysLegion\Migration\Security\IdentifierValidator;
+
 /**
  * MonkeysLegion Framework — Migration Package
  *
@@ -29,6 +31,8 @@ final class PostgreSqlDialect implements SqlDialect
 
     public function quoteIdentifier(string $name): string
     {
+        IdentifierValidator::validate($name);
+
         return "\"{$name}\"";
     }
 
@@ -138,7 +142,7 @@ SQL;
 
     public function dropForeignKeySql(string $table, string $fkName): string
     {
-        return "ALTER TABLE \"{$table}\" DROP CONSTRAINT \"{$fkName}\"";
+        return "ALTER TABLE {$this->quoteIdentifier($table)} DROP CONSTRAINT {$this->quoteIdentifier($fkName)}";
     }
 
     public function uuidFkType(): string
@@ -173,29 +177,35 @@ SQL;
         string $defaultClause,
     ): string {
         $parts   = [];
-        $parts[] = "ALTER COLUMN \"{$column}\" TYPE {$baseType}";
+        $qColumn = $this->quoteIdentifier($column);
+        $parts[] = "ALTER COLUMN {$qColumn} TYPE {$baseType}";
         $parts[] = $nullable
-            ? "ALTER COLUMN \"{$column}\" DROP NOT NULL"
-            : "ALTER COLUMN \"{$column}\" SET NOT NULL";
+            ? "ALTER COLUMN {$qColumn} DROP NOT NULL"
+            : "ALTER COLUMN {$qColumn} SET NOT NULL";
 
         if ($defaultClause !== '') {
             $defaultValue = preg_replace('/^\s*DEFAULT\s+/i', '', $defaultClause);
-            $parts[] = "ALTER COLUMN \"{$column}\" SET DEFAULT {$defaultValue}";
+            $parts[] = "ALTER COLUMN {$qColumn} SET DEFAULT {$defaultValue}";
         }
 
-        return "ALTER TABLE \"{$table}\" " . implode(', ', $parts);
+        return "ALTER TABLE {$this->quoteIdentifier($table)} " . implode(', ', $parts);
     }
 
     public function renameColumnSql(string $table, string $from, string $to): string
     {
-        return "ALTER TABLE \"{$table}\" RENAME COLUMN \"{$from}\" TO \"{$to}\"";
+        return sprintf(
+            'ALTER TABLE %s RENAME COLUMN %s TO %s',
+            $this->quoteIdentifier($table),
+            $this->quoteIdentifier($from),
+            $this->quoteIdentifier($to),
+        );
     }
 
     // ── Index operations ───────────────────────────────────────────
 
     public function dropIndexSql(string $table, string $indexName): string
     {
-        return "DROP INDEX \"{$indexName}\"";
+        return "DROP INDEX {$this->quoteIdentifier($indexName)}";
     }
 
     // ── Transaction support ────────────────────────────────────────
@@ -211,7 +221,7 @@ SQL;
     {
         $escaped = str_replace("'", "''", $comment);
 
-        return "COMMENT ON TABLE \"{$table}\" IS '{$escaped}'";
+        return "COMMENT ON TABLE {$this->quoteIdentifier($table)} IS '{$escaped}'";
     }
 
     // ── Private helpers ────────────────────────────────────────────

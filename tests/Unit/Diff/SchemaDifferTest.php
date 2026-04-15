@@ -324,6 +324,47 @@ final class SchemaDifferTest extends TestCase
         $this->assertCount(1, $plan->alterTables[0]->addedForeignKeys);
     }
 
+    public function testChangedFkDefinitionReplaced(): void
+    {
+        $desired = [
+            'posts' => new TableDefinition(
+                name: 'posts',
+                columns: ['id' => new ColumnDefinition(name: 'id', type: 'int')],
+                foreignKeys: [
+                    new ForeignKeyDefinition(
+                        name: 'fk_posts_author',
+                        column: 'author_id',
+                        referencedTable: 'users',
+                        referencedColumn: 'id',
+                        onDelete: 'CASCADE',
+                    ),
+                ],
+            ),
+        ];
+
+        $current = [
+            'posts' => new TableDefinition(
+                name: 'posts',
+                columns: ['id' => new ColumnDefinition(name: 'id', type: 'int')],
+                foreignKeys: [
+                    new ForeignKeyDefinition(
+                        name: 'fk_posts_author_old',
+                        column: 'author_id',
+                        referencedTable: 'members',
+                        referencedColumn: 'id',
+                        onDelete: 'RESTRICT',
+                    ),
+                ],
+            ),
+        ];
+
+        $plan = $this->differ->diff($desired, $current);
+
+        $this->assertCount(1, $plan->alterTables);
+        $this->assertCount(1, $plan->alterTables[0]->addedForeignKeys);
+        $this->assertContains('fk_posts_author_old', $plan->alterTables[0]->droppedForeignKeys);
+    }
+
     // ── DiffPlan helpers ───────────────────────────────────────────
 
     public function testDiffPlanIsEmptyWhenNoChanges(): void

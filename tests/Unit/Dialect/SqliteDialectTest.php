@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Tests\Unit\Dialect;
 
+use InvalidArgumentException;
 use MonkeysLegion\Migration\Dialect\SqliteDialect;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -26,6 +27,12 @@ final class SqliteDialectTest extends TestCase
     public function testQuoteIdentifier(): void
     {
         $this->assertSame('"users"', $this->dialect->quoteIdentifier('users'));
+    }
+
+    public function testQuoteIdentifierRejectsUnsafeIdentifier(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->dialect->quoteIdentifier('users;DROP');
     }
 
     // ── Type mapping ───────────────────────────────────────────────

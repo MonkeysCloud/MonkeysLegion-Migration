@@ -3,6 +3,8 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Dialect;
 
+use MonkeysLegion\Migration\Security\IdentifierValidator;
+
 /**
  * MonkeysLegion Framework — Migration Package
  *
@@ -28,6 +30,8 @@ final class SqliteDialect implements SqlDialect
 
     public function quoteIdentifier(string $name): string
     {
+        IdentifierValidator::validate($name);
+
         return "\"{$name}\"";
     }
 
@@ -109,7 +113,11 @@ final class SqliteDialect implements SqlDialect
     public function dropForeignKeySql(string $table, string $fkName): string
     {
         // SQLite does not support DROP FOREIGN KEY
-        return "-- SQLite: Cannot drop FK \"{$fkName}\" from \"{$table}\" (not supported)";
+        return sprintf(
+            '-- SQLite: Cannot drop FK %s from %s (not supported)',
+            $this->quoteIdentifier($fkName),
+            $this->quoteIdentifier($table),
+        );
     }
 
     public function uuidFkType(): string
@@ -147,20 +155,32 @@ final class SqliteDialect implements SqlDialect
         $null = $nullable ? ' NULL' : ' NOT NULL';
 
         return "-- SQLite: ALTER COLUMN not supported. "
-            . "Would change \"{$table}\".\"{$column}\" to {$baseType}{$null}{$defaultClause}";
+            . sprintf(
+                'Would change %s.%s to %s%s%s',
+                $this->quoteIdentifier($table),
+                $this->quoteIdentifier($column),
+                $baseType,
+                $null,
+                $defaultClause,
+            );
     }
 
     public function renameColumnSql(string $table, string $from, string $to): string
     {
         // Supported since SQLite 3.25.0
-        return "ALTER TABLE \"{$table}\" RENAME COLUMN \"{$from}\" TO \"{$to}\"";
+        return sprintf(
+            'ALTER TABLE %s RENAME COLUMN %s TO %s',
+            $this->quoteIdentifier($table),
+            $this->quoteIdentifier($from),
+            $this->quoteIdentifier($to),
+        );
     }
 
     // ── Index operations ───────────────────────────────────────────
 
     public function dropIndexSql(string $table, string $indexName): string
     {
-        return "DROP INDEX IF EXISTS \"{$indexName}\"";
+        return "DROP INDEX IF EXISTS {$this->quoteIdentifier($indexName)}";
     }
 
     // ── Transaction support ────────────────────────────────────────

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Tests\Unit\Dialect;
 
+use InvalidArgumentException;
 use MonkeysLegion\Migration\Dialect\PostgreSqlDialect;
 use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -26,6 +27,12 @@ final class PostgreSqlDialectTest extends TestCase
     public function testQuoteIdentifierUsesDoubleQuotes(): void
     {
         $this->assertSame('"users"', $this->dialect->quoteIdentifier('users'));
+    }
+
+    public function testQuoteIdentifierRejectsUnsafeIdentifier(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->dialect->quoteIdentifier('users;DROP');
     }
 
     // ─── Type mapping ──────────────────────────────────────────────
