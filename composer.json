@@ -1,16 +1,16 @@
 {
   "name": "monkeyscloud/monkeyslegion-migration",
-  "description": "Entity-schema diff engine and SQL migration runner.",
+  "description": "Entity-schema diff engine, SQL migration runner, and dialect-aware DDL generation for MonkeysLegion v2.",
   "type": "library",
   "license": "MIT",
   "minimum-stability": "dev",
   "prefer-stable": true,
   "require": {
     "php": "^8.4",
-    "monkeyscloud/monkeyslegion-core": "^1.0",
-    "monkeyscloud/monkeyslegion-di": "^1.0",
-    "monkeyscloud/monkeyslegion-entity": "^1.0",
-    "monkeyscloud/monkeyslegion-database": "^1.0"
+    "monkeyscloud/monkeyslegion-core": "^2.0",
+    "monkeyscloud/monkeyslegion-di": "^2.0",
+    "monkeyscloud/monkeyslegion-entity": "^2.0",
+    "monkeyscloud/monkeyslegion-database": "^2.0"
   },
   "require-dev": {
     "phpunit/phpunit": "^11.0",
@@ -43,7 +43,7 @@
   },
   "extra": {
     "branch-alias": {
-      "dev-main": "1.0.x-dev"
+      "dev-main": "2.0.x-dev"
     }
   }
 }

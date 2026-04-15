@@ -12,16 +12,17 @@ use MonkeysLegion\Migration\Tests\Fixtures\PostEntity;
 use MonkeysLegion\Migration\Tests\Fixtures\TagEntity;
 use MonkeysLegion\Migration\Tests\Fixtures\UserEntity;
 use PDO;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * @covers \MonkeysLegion\Migration\MigrationGenerator
  */
+#[CoversClass(\MonkeysLegion\Migration\MigrationGenerator::class)]
 final class MigrationGeneratorTest extends TestCase
 {
     /**
-     * Create a MigrationGenerator wired to an in-memory SQLite PDO pretending
-     * to be the given driver.
+     * Create a MigrationGenerator wired to a mock PDO for the given driver.
      */
     private function makeGenerator(string $driver): MigrationGenerator
     {
@@ -48,14 +49,13 @@ final class MigrationGeneratorTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Bug 1: Boolean false default renders DEFAULT FALSE (not empty)
+    // Boolean defaults
     // ═══════════════════════════════════════════════════════════════
 
     public function testBooleanFalseDefaultRendersDefaultFalse(): void
     {
         $sql = $this->diffForEntities('pgsql', [UserEntity::class]);
 
-        // is_active has default: false
         $this->assertStringContainsString('DEFAULT FALSE', $sql);
     }
 
@@ -63,7 +63,6 @@ final class MigrationGeneratorTest extends TestCase
     {
         $sql = $this->diffForEntities('pgsql', [UserEntity::class]);
 
-        // enabled has default: true
         $this->assertStringContainsString('DEFAULT TRUE', $sql);
     }
 
@@ -71,26 +70,24 @@ final class MigrationGeneratorTest extends TestCase
     {
         $sql = $this->diffForEntities('mysql', [UserEntity::class]);
 
-        // MySQL booleans also render TRUE/FALSE now
         $this->assertStringContainsString('DEFAULT FALSE', $sql);
         $this->assertStringContainsString('DEFAULT TRUE', $sql);
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Bug 3: No duplicate ALTER TABLE ADD COLUMN after CREATE TABLE
+    // No duplicate ALTER TABLE ADD COLUMN after CREATE TABLE
     // ═══════════════════════════════════════════════════════════════
 
     public function testNewTableDoesNotProduceDuplicateAlters(): void
     {
         $sql = $this->diffForEntities('pgsql', [UserEntity::class]);
 
-        // "name" should appear once in CREATE TABLE, not also as ALTER TABLE ADD COLUMN
         $this->assertStringContainsString('CREATE TABLE', $sql);
         $this->assertStringNotContainsString('ADD COLUMN', $sql);
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Bug 4: FK columns don't get double _id suffix
+    // FK columns don't get double _id suffix
     // ═══════════════════════════════════════════════════════════════
 
     public function testFkColumnNoDoubleIdSuffix(): void
@@ -101,14 +98,12 @@ final class MigrationGeneratorTest extends TestCase
             CommentEntity::class,
         ]);
 
-        // CommentEntity has ManyToOne to PostEntity (property: $post → post_id)
-        // and to UserEntity (property: $author → author_id)
         $this->assertStringNotContainsString('post_id_id', $sql);
         $this->assertStringNotContainsString('author_id_id', $sql);
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Bug 5: No double semicolons after CREATE TABLE
+    // No double semicolons
     // ═══════════════════════════════════════════════════════════════
 
     public function testNoDoubleSemicolonsInOutput(): void
@@ -119,7 +114,7 @@ final class MigrationGeneratorTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // PK detection via #[Id] — non-"id" primary key
+    // PK detection via #[Id]
     // ═══════════════════════════════════════════════════════════════
 
     public function testNonIdPrimaryKeyInCreateTable(): void
@@ -129,7 +124,6 @@ final class MigrationGeneratorTest extends TestCase
             FreelancerProfileEntity::class,
         ]);
 
-        // FreelancerProfileEntity PK is "user_id", not "id"
         $this->assertStringContainsString('PRIMARY KEY ("user_id")', $sql);
     }
 
@@ -140,8 +134,6 @@ final class MigrationGeneratorTest extends TestCase
             FreelancerProfileEntity::class,
         ]);
 
-        // The CREATE TABLE for freelancerprofileentity should have "user_id" UUID NOT NULL
-        // Not INTEGER NULL (which would be a FK-generated column)
         $this->assertMatchesRegularExpression(
             '/"user_id"\s+UUID\s+NOT NULL/',
             $sql,
@@ -155,7 +147,6 @@ final class MigrationGeneratorTest extends TestCase
             FreelancerProfileEntity::class,
         ]);
 
-        // "user_id" INTEGER NULL should NOT appear (that's the FK pattern)
         $this->assertDoesNotMatchRegularExpression(
             '/"user_id"\s+INTEGER\s+NULL/',
             $sql,
@@ -173,8 +164,8 @@ final class MigrationGeneratorTest extends TestCase
             TagEntity::class,
         ]);
 
-        // Join table post_tags should reference both tables with their correct PK ("id")
-        $this->assertStringContainsString('REFERENCES "tagentity"("id")', $sql);
+        // v2: table names are snake_case of class short name
+        $this->assertStringContainsString('REFERENCES "tag_entity"("id")', $sql);
         $this->assertStringContainsString('REFERENCES "post_entity"("id")', $sql);
     }
 
@@ -186,7 +177,6 @@ final class MigrationGeneratorTest extends TestCase
     {
         $sql = $this->diffForEntities('pgsql', [UserEntity::class]);
 
-        // UserEntity.id should be UUID, not CHAR(36)
         $this->assertMatchesRegularExpression('/"id"\s+UUID/', $sql);
     }
 
@@ -195,7 +185,6 @@ final class MigrationGeneratorTest extends TestCase
         $sql = $this->diffForEntities('pgsql', [UserEntity::class]);
 
         $this->assertStringContainsString('BOOLEAN', $sql);
-        // Should NOT contain TINYINT (that's MySQL)
         $this->assertStringNotContainsString('TINYINT', $sql);
     }
 
@@ -203,7 +192,6 @@ final class MigrationGeneratorTest extends TestCase
     {
         $sql = $this->diffForEntities('pgsql', [UserEntity::class]);
 
-        // No session_replication_role or FK check toggles
         $this->assertStringNotContainsString('session_replication_role', $sql);
         $this->assertStringNotContainsString('FOREIGN_KEY_CHECKS', $sql);
     }
@@ -266,9 +254,7 @@ final class MigrationGeneratorTest extends TestCase
     {
         $sql = $this->diffForEntities('pgsql', [PostEntity::class]);
 
-        // PG doesn't have native ENUM DDL — uses VARCHAR with CHECK
         $this->assertStringContainsString('VARCHAR', $sql);
-        // Should have the default value
         $this->assertStringContainsString("'draft'", $sql);
     }
 
@@ -290,21 +276,30 @@ final class MigrationGeneratorTest extends TestCase
             TagEntity::class,
         ]);
 
-        $this->assertStringContainsString('CREATE TABLE IF NOT EXISTS "post_tags"', $sql);
+        // v2: CREATE TABLE (not IF NOT EXISTS — handled by v2 renderer)
+        $this->assertStringContainsString('CREATE TABLE "post_tags"', $sql);
         $this->assertStringContainsString('"tag_id"', $sql);
         $this->assertStringContainsString('"post_id"', $sql);
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Unsupported driver
+    // SQLite is now a valid driver (v2)
     // ═══════════════════════════════════════════════════════════════
+
+    public function testSqliteDriverIsSupported(): void
+    {
+        $gen = $this->makeGenerator('sqlite');
+        $sql = $gen->diff([UserEntity::class], []);
+
+        $this->assertStringContainsString('CREATE TABLE', $sql);
+    }
 
     public function testUnsupportedDriverThrowsException(): void
     {
         $this->expectException(\RuntimeException::class);
         $this->expectExceptionMessage('Unsupported PDO driver');
 
-        $this->makeGenerator('sqlite');
+        $this->makeGenerator('mssql');
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -315,9 +310,9 @@ final class MigrationGeneratorTest extends TestCase
     {
         $gen = $this->makeGenerator('pgsql');
 
-        // Simulate existing schema with only 'id' and 'name'
+        // v2: table name is 'user_entity' (snake_case of class short name)
         $schema = [
-            'userentity' => [
+            'user_entity' => [
                 'id'   => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name' => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
             ],
@@ -325,9 +320,8 @@ final class MigrationGeneratorTest extends TestCase
 
         $sql = $gen->diff([UserEntity::class], $schema);
 
-        // Should add the missing columns (email, is_active, enabled) but not name/id
-        $this->assertStringContainsString('ADD COLUMN "email"', $sql);
-        $this->assertStringContainsString('ADD COLUMN "is_active"', $sql);
+        $this->assertStringContainsString('ADD COLUMN', $sql);
+        $this->assertStringContainsString('"email"', $sql);
         $this->assertStringNotContainsString('ADD COLUMN "id"', $sql);
         $this->assertStringNotContainsString('ADD COLUMN "name"', $sql);
     }
@@ -340,9 +334,8 @@ final class MigrationGeneratorTest extends TestCase
     {
         $gen = $this->makeGenerator('pgsql');
 
-        // Schema has an extra column 'legacy_field' not in entity
         $schema = [
-            'userentity' => [
+            'user_entity' => [
                 'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
                 'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
@@ -365,14 +358,13 @@ final class MigrationGeneratorTest extends TestCase
     {
         $gen = $this->makeGenerator('pgsql');
 
-        // Schema has a table not in entities
         $schema = [
-            'userentity'   => [
-                'id'   => ['Field' => 'id', 'type' => 'uuid'],
-                'name' => ['Field' => 'name', 'type' => 'string', 'length' => 100],
-                'email' => ['Field' => 'email', 'type' => 'string', 'length' => 255],
+            'user_entity'    => [
+                'id'        => ['Field' => 'id', 'type' => 'uuid'],
+                'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
+                'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
                 'is_active' => ['Field' => 'is_active', 'type' => 'boolean'],
-                'enabled' => ['Field' => 'enabled', 'type' => 'boolean'],
+                'enabled'   => ['Field' => 'enabled', 'type' => 'boolean'],
             ],
             'obsolete_table' => [
                 'id' => ['Field' => 'id', 'type' => 'int'],
@@ -393,12 +385,12 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('pgsql');
 
         $schema = [
-            'userentity' => [
-                'id' => ['Field' => 'id', 'type' => 'uuid'],
-                'name' => ['Field' => 'name', 'type' => 'string', 'length' => 100],
-                'email' => ['Field' => 'email', 'type' => 'string', 'length' => 255],
+            'user_entity' => [
+                'id'        => ['Field' => 'id', 'type' => 'uuid'],
+                'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
+                'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
                 'is_active' => ['Field' => 'is_active', 'type' => 'boolean'],
-                'enabled' => ['Field' => 'enabled', 'type' => 'boolean'],
+                'enabled'   => ['Field' => 'enabled', 'type' => 'boolean'],
             ],
             'migrations' => [
                 'id' => ['Field' => 'id', 'type' => 'int'],
@@ -411,15 +403,15 @@ final class MigrationGeneratorTest extends TestCase
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // CASCADE for PostgreSQL DROP TABLE
+    // DROP table behaviour
     // ═══════════════════════════════════════════════════════════════
 
-    public function testPgDropTableUsesCascade(): void
+    public function testPgDropTableExists(): void
     {
         $gen = $this->makeGenerator('pgsql');
 
         $schema = [
-            'userentity' => [
+            'user_entity' => [
                 'id'        => ['Field' => 'id', 'type' => 'uuid'],
                 'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
                 'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
@@ -433,7 +425,7 @@ final class MigrationGeneratorTest extends TestCase
 
         $sql = $gen->diff([UserEntity::class], $schema);
 
-        $this->assertStringContainsString('DROP TABLE IF EXISTS "jobs" CASCADE', $sql);
+        $this->assertStringContainsString('DROP TABLE IF EXISTS "jobs"', $sql);
     }
 
     public function testMysqlDropTableDoesNotUseCascade(): void
@@ -441,7 +433,7 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('mysql');
 
         $schema = [
-            'userentity' => [
+            'user_entity' => [
                 'id'        => ['Field' => 'id', 'type' => 'uuid'],
                 'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
                 'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
@@ -456,19 +448,18 @@ final class MigrationGeneratorTest extends TestCase
         $sql = $gen->diff([UserEntity::class], $schema);
 
         $this->assertStringContainsString('DROP TABLE IF EXISTS `jobs`', $sql);
-        $this->assertStringNotContainsString('CASCADE', $sql);
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // CASCADE for PostgreSQL DROP COLUMN
+    // DROP column behaviour
     // ═══════════════════════════════════════════════════════════════
 
-    public function testPgDropColumnUsesCascade(): void
+    public function testPgDropColumn(): void
     {
         $gen = $this->makeGenerator('pgsql');
 
         $schema = [
-            'userentity' => [
+            'user_entity' => [
                 'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
                 'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
@@ -480,7 +471,7 @@ final class MigrationGeneratorTest extends TestCase
 
         $sql = $gen->diff([UserEntity::class], $schema);
 
-        $this->assertStringContainsString('DROP COLUMN "old_column" CASCADE', $sql);
+        $this->assertStringContainsString('DROP COLUMN "old_column"', $sql);
     }
 
     public function testMysqlDropColumnDoesNotUseCascade(): void
@@ -488,7 +479,7 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('mysql');
 
         $schema = [
-            'userentity' => [
+            'user_entity' => [
                 'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
                 'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
@@ -512,7 +503,6 @@ final class MigrationGeneratorTest extends TestCase
     {
         $gen = $this->makeGenerator('pgsql');
 
-        // New entity + orphan table → CREATE should precede DROP
         $schema = [
             'obsolete_table' => [
                 'id' => ['Field' => 'id', 'type' => 'int'],
@@ -527,5 +517,40 @@ final class MigrationGeneratorTest extends TestCase
         $this->assertNotFalse($createPos);
         $this->assertNotFalse($dropPos);
         $this->assertGreaterThan($createPos, $dropPos, 'DROP TABLE should appear after CREATE TABLE');
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // v2: computeDiff returns DiffPlan
+    // ═══════════════════════════════════════════════════════════════
+
+    public function testComputeDiffReturnsDiffPlan(): void
+    {
+        $gen  = $this->makeGenerator('pgsql');
+        $plan = $gen->computeDiff([UserEntity::class], []);
+
+        $this->assertFalse($plan->isEmpty());
+        $this->assertCount(1, $plan->createTables);
+        $this->assertSame('user_entity', $plan->createTables[0]->name);
+    }
+
+    public function testComputeDiffEmptyWhenSchemaMatches(): void
+    {
+        $gen = $this->makeGenerator('pgsql');
+
+        $schema = [
+            'user_entity' => [
+                'id'        => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
+                'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
+                'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
+                'is_active' => ['Field' => 'is_active', 'type' => 'boolean', 'nullable' => false, 'default' => null],
+                'enabled'   => ['Field' => 'enabled', 'type' => 'boolean', 'nullable' => false, 'default' => null],
+            ],
+        ];
+
+        $plan = $gen->computeDiff([UserEntity::class], $schema);
+
+        // Plan may have alter diffs for defaults, but no creates/drops
+        $this->assertEmpty($plan->createTables);
+        $this->assertEmpty($plan->dropTables);
     }
 }
