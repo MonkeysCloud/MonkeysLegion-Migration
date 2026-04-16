@@ -1,68 +1,155 @@
 <?php
-
 declare(strict_types=1);
 
 namespace MonkeysLegion\Migration;
 
 use DateTimeImmutable;
 use MonkeysLegion\Database\Contracts\ConnectionInterface;
-use MonkeysLegion\Entity\Attributes\Column as ColumnAttr;
-use MonkeysLegion\Entity\Attributes\Entity;
-use MonkeysLegion\Entity\Attributes\Field as FieldAttr;
-use MonkeysLegion\Entity\Attributes\Id as IdAttr;
-use MonkeysLegion\Entity\Attributes\JoinTable;
-use MonkeysLegion\Entity\Attributes\ManyToMany;
-use MonkeysLegion\Entity\Attributes\ManyToOne;
-use MonkeysLegion\Entity\Attributes\OneToMany;
-use MonkeysLegion\Entity\Attributes\OneToOne;
 use MonkeysLegion\Migration\Dialect\MySqlDialect;
 use MonkeysLegion\Migration\Dialect\PostgreSqlDialect;
 use MonkeysLegion\Migration\Dialect\SqlDialect;
+use MonkeysLegion\Migration\Dialect\SqliteDialect;
+use MonkeysLegion\Migration\Diff\DiffPlan;
+use MonkeysLegion\Migration\Diff\SchemaDiffer;
+use MonkeysLegion\Migration\Renderer\SqlRenderer;
+use MonkeysLegion\Migration\Schema\EntitySchemaBuilder;
+use MonkeysLegion\Migration\Schema\SchemaIntrospector;
 use PDO;
 use ReflectionClass;
-use ReflectionProperty;
 
+/**
+ * MonkeysLegion Framework — Migration Package
+ *
+ * Facade that orchestrates entity-schema diffing and migration generation.
+ *
+ * In v2, this class delegates to:
+ *  - EntitySchemaBuilder  — reads entity attributes → TableDefinition
+ *  - SchemaIntrospector   — reads live DB → TableDefinition
+ *  - SchemaDiffer         — compares two states → DiffPlan
+ *  - SqlRenderer          — converts DiffPlan → SQL
+ *
+ * Backward-compatible: the public `diff()` and `generate()` methods
+ * retain the same signatures as v1 so existing CLI commands keep working.
+ *
+ * @copyright 2026 MonkeysCloud Team
+ * @license   MIT
+ */
 final class MigrationGenerator
 {
-    /** Tables that must never be dropped automatically. */
+    /** @var list<string> Tables that must never be dropped automatically. */
     private array $protectedTables = ['migrations', 'ml_migrations'];
 
-    /** Detected PDO driver name ('mysql' | 'pgsql'). */
-    private string $driver;
+    /** Detected PDO driver name. */
+    private readonly string $driver;
 
     /** Dialect strategy resolved from the driver. */
-    private SqlDialect $dialect;
+    private readonly SqlDialect $dialect;
 
-    public function __construct(private ConnectionInterface $db)
+    /** v2 components */
+    private readonly EntitySchemaBuilder $entityBuilder;
+    private readonly SchemaIntrospector $introspector;
+    private readonly SchemaDiffer $differ;
+    private readonly SqlRenderer $renderer;
+
+    public function __construct(private readonly ConnectionInterface $db)
     {
         $this->driver = $this->db->pdo()->getAttribute(PDO::ATTR_DRIVER_NAME);
 
         $this->dialect = match ($this->driver) {
-            'pgsql' => new PostgreSqlDialect(),
-            'mysql' => new MySqlDialect(),
-            default => throw new \RuntimeException(
+            'pgsql'  => new PostgreSqlDialect(),
+            'sqlite' => new SqliteDialect(),
+            'mysql'  => new MySqlDialect(),
+            default  => throw new \RuntimeException(
                 sprintf(
-                    "Unsupported PDO driver '%s'. Supported drivers: 'mysql', 'pgsql'.",
+                    "Unsupported PDO driver '%s'. Supported: 'mysql', 'pgsql', 'sqlite'.",
                     $this->driver,
                 ),
             ),
         };
+
+        $this->entityBuilder = new EntitySchemaBuilder();
+        $this->introspector  = new SchemaIntrospector($this->db, $this->dialect);
+        $this->differ        = new SchemaDiffer();
+        $this->renderer      = new SqlRenderer($this->dialect);
+
+        // Register protected tables
+        foreach ($this->protectedTables as $table) {
+            $this->differ->addProtectedTable($table);
+        }
     }
 
-    // ─── public API ─────────────────────────────────────────────────
+    // ── Public API ─────────────────────────────────────────────────
+
+    /**
+     * Compute SQL to migrate current DB schema to match entity metadata.
+     *
+     * Backward-compatible with v1 signature:
+     *   $sql = $generator->diff($entities, $schema);
+     *
+     * In v2, $schema can be:
+     *  - array<string, array<string, array<string, mixed>>>  (v1 raw format)
+     *  - array<string, TableDefinition>                       (v2 structured)
+     *
+     * @param list<class-string|ReflectionClass<object>> $entities Entity FQCNs.
+     * @param array<string, mixed>                        $schema   Current DB schema.
+     *
+     * @return string SQL statements to apply.
+     */
+    public function diff(array $entities, array $schema): string
+    {
+        $plan = $this->computeDiff($entities, $schema);
+
+        if ($plan->isEmpty()) {
+            return '';
+        }
+
+        return $this->renderer->render($plan);
+    }
+
+    /**
+     * Compute a structured DiffPlan (v2 API).
+     *
+     * @param list<class-string|ReflectionClass<object>> $entities
+     * @param array<string, mixed>|null                   $schema  Current DB schema (null = introspect).
+     */
+    public function computeDiff(array $entities, ?array $schema = null): DiffPlan
+    {
+        // Build desired state from entities
+        $desiredTables = $this->entityBuilder->buildAll($entities);
+        $joinTables    = $this->entityBuilder->buildJoinTables($entities);
+        $desired       = array_merge($desiredTables, $joinTables);
+
+        // Build current state
+        if ($schema === null) {
+            $current = $this->introspector->introspect();
+        } else {
+            // Convert v1 raw format to v2 TableDefinitions if needed
+            $current = $this->normalizeSchema($schema);
+        }
+
+        return $this->differ->diff($desired, $current);
+    }
 
     /**
      * Generate a migration PHP file under var/migrations/.
+     *
+     * @param list<class-string|ReflectionClass<object>> $entities
+     * @param array<string, mixed>                        $schema
+     * @param string                                      $name
+     *
+     * @return string Path to the generated migration file.
      */
     public function generate(array $entities, array $schema, string $name = 'migration'): string
     {
-        $sqlUp   = trim($this->diff($entities, $schema));
-        $sqlDown = $this->autoReverse($sqlUp);
+        $plan = $this->computeDiff($entities, $schema);
 
-        $ts     = (new DateTimeImmutable())->format('YmdHis');
-        $slug   = preg_replace('/[^A-Za-z0-9]+/', '_', $name);
-        $class  = "M{$ts}" . ucfirst($slug);
-        $file   = base_path("var/migrations/{$class}.php");
+        $sqlUp   = $plan->isEmpty() ? '' : trim($this->renderer->render($plan));
+        $sqlDown = $plan->isEmpty() ? '' : trim($this->renderer->renderReverse($plan));
+
+        $ts    = (new DateTimeImmutable())->format('YmdHis');
+        $slug  = preg_replace('/[^A-Za-z0-9]+/', '_', $name);
+        $class = "M{$ts}" . ucfirst((string) $slug);
+        $file  = base_path("var/migrations/{$class}.php");
 
         $template = <<<PHP
 <?php
@@ -90,726 +177,143 @@ SQL);
 }
 PHP;
 
-        @mkdir(dirname($file), 0755, true);
+        $dir = dirname($file);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
+        }
+
         file_put_contents($file, $template);
 
         return $file;
     }
 
     /**
-     * Compute SQL to migrate current DB schema to match entity metadata.
-     * Produces dialect-appropriate DDL for both MySQL and PostgreSQL.
+     * Generate a backup SQL file of the current schema.
+     *
+     * @return string Path to the backup file.
      */
-    public function diff(array $entities, array $schema): string
+    public function backup(): string
     {
-        $q = fn(string $id): string => $this->dialect->quoteIdentifier($id);
+        $schema    = $this->introspector->introspect();
+        $timestamp = (new DateTimeImmutable())->format('YmdHis');
+        $file      = base_path("var/backups/schema_{$timestamp}.sql");
 
-        $alterStmts     = [];
-        $joinTableStmts = [];
-
-        $seenEntityTables = [];
-        $seenJoinTables   = [];
-
-        // First pass: collect primary key types and names for each entity
-        $primaryKeyTypes = [];
-        $primaryKeyNames = [];
-        $entityTableMap  = [];
-        foreach ($entities as $entityFqcn) {
-            $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
-            $attributes = $ref->getAttributes(Entity::class);
-
-            if (!empty($attributes)) {
-                $entityAttr = $attributes[0]->newInstance();
-                $table = $entityAttr->table;
-            } else {
-                $table = strtolower($ref->getShortName());
-            }
-            $entityTableMap[is_string($entityFqcn) ? $entityFqcn : $ref->getName()] = $table;
-
-            foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-                // Prefer #[Id] attribute for PK detection
-                if ($prop->getAttributes(IdAttr::class)) {
-                    $primaryKeyNames[$table] = $prop->getName();
-                    $fieldAttrs = $prop->getAttributes(FieldAttr::class);
-                    if ($fieldAttrs) {
-                        $fa = $fieldAttrs[0]->newInstance();
-                        $primaryKeyTypes[$table] = $fa->type ?? 'int';
-                    } else {
-                        $primaryKeyTypes[$table] = 'int';
-                    }
-                    break;
-                }
-                // Fallback: #[Field(primaryKey: true)]
-                $attrs = $prop->getAttributes(FieldAttr::class);
-                if ($attrs) {
-                    $attr = $attrs[0]->newInstance();
-                    if ($attr->primaryKey) {
-                        $primaryKeyNames[$table] = $prop->getName();
-                        $primaryKeyTypes[$table] = $attr->type ?? 'int';
-                        break;
-                    }
-                }
-            }
-            if (!isset($primaryKeyTypes[$table])) {
-                $primaryKeyTypes[$table] = 'int';
-            }
-            if (!isset($primaryKeyNames[$table])) {
-                $primaryKeyNames[$table] = 'id';
-            }
+        $dir = dirname($file);
+        if (!is_dir($dir)) {
+            mkdir($dir, 0755, true);
         }
 
-        foreach ($entities as $entityFqcn) {
-            $ref = $entityFqcn instanceof ReflectionClass
-                ? $entityFqcn
-                : new ReflectionClass($entityFqcn);
+        $lines = ["-- Schema backup: {$timestamp}", "-- Driver: {$this->driver}", ''];
 
-            $attributes = $ref->getAttributes(Entity::class);
+        foreach ($schema as $tableName => $table) {
+            $lines[] = "-- Table: {$tableName}";
+            $lines[] = "-- Columns: " . implode(', ', $table->getColumnNames());
+            $lines[] = '';
+        }
 
-            if (!empty($attributes)) {
-                $entityAttr = $attributes[0]->newInstance();
-                $table = $entityAttr->table;
-            } else {
-                $table = strtolower($ref->getShortName());
+        file_put_contents($file, implode("\n", $lines));
+
+        return $file;
+    }
+
+    // ── Accessors for v2 components ───────────────────────────────
+
+    /**
+     * Get the entity schema builder.
+     */
+    public function getEntityBuilder(): EntitySchemaBuilder
+    {
+        return $this->entityBuilder;
+    }
+
+    /**
+     * Get the schema introspector.
+     */
+    public function getIntrospector(): SchemaIntrospector
+    {
+        return $this->introspector;
+    }
+
+    /**
+     * Get the schema differ.
+     */
+    public function getDiffer(): SchemaDiffer
+    {
+        return $this->differ;
+    }
+
+    /**
+     * Get the SQL renderer.
+     */
+    public function getRenderer(): SqlRenderer
+    {
+        return $this->renderer;
+    }
+
+    /**
+     * Get the dialect.
+     */
+    public function getDialect(): SqlDialect
+    {
+        return $this->dialect;
+    }
+
+    // ── Private helpers ────────────────────────────────────────────
+
+    /**
+     * Normalize a v1 raw schema format to v2 TableDefinitions.
+     *
+     * v1 format: [ tableName => [ colName => [ 'Field' => ..., 'Type' => ... ] ] ]
+     *
+     * @param array<string, mixed> $schema
+     *
+     * @return array<string, \MonkeysLegion\Migration\Schema\TableDefinition>
+     */
+    private function normalizeSchema(array $schema): array
+    {
+        $tables = [];
+
+        foreach ($schema as $tableName => $cols) {
+            // Check if this is already a TableDefinition (v2 format)
+            if ($cols instanceof \MonkeysLegion\Migration\Schema\TableDefinition) {
+                $tables[$tableName] = $cols;
+                continue;
             }
 
-            $seenEntityTables[$table] = true;
-
-            if (!isset($schema[$table])) {
-                $alterStmts[] = $this->createTableSql($ref, $table);
-                // Mark table as seen; skip per-column diff — CREATE TABLE
-                // already includes every column.
-                $schema[$table] = ['__new__' => true];
-                $seenEntityTables[$table] = true;
-
-                // Still need to process ManyToMany join tables for this entity
-                foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-                    foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
-                        $meta = $attr->newInstance();
-                        if ($meta->joinTable instanceof JoinTable) {
-                            $jt = $meta->joinTable;
-                            $seenJoinTables[$jt->name] = true;
-                            $targetTable = $this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '');
-                            $ownerPk  = $primaryKeyNames[$table] ?? 'id';
-                            $targetPk = $primaryKeyNames[$targetTable] ?? 'id';
-
-                            $joinTableStmts[$jt->name] =
-                                "CREATE TABLE IF NOT EXISTS {$q($jt->name)} (\n"
-                                . "    {$q($jt->joinColumn)} INT NOT NULL,\n"
-                                . "    {$q($jt->inverseColumn)} INT NOT NULL,\n"
-                                . "    PRIMARY KEY ({$q($jt->joinColumn)}, {$q($jt->inverseColumn)}),\n"
-                                . "    FOREIGN KEY ({$q($jt->joinColumn)})   REFERENCES {$q($table)}({$q($ownerPk)})   ON DELETE CASCADE,\n"
-                                . "    FOREIGN KEY ({$q($jt->inverseColumn)}) REFERENCES {$q($targetTable)}({$q($targetPk)}) ON DELETE CASCADE\n"
-                                . ")" . $this->dialect->engineSuffix() . ";";
-                        }
-                    }
-                }
-                continue; // skip per-column diff for this newly created table
+            if (!is_array($cols)) {
+                continue;
             }
 
-            $existingCols = array_keys($schema[$table] ?? []);
-            $skipCols     = [];
-            $pkName       = $primaryKeyNames[$table] ?? 'id';
-            $expectedCols = [$pkName => true];
-
-            foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-                $propName = $prop->getName();
-
-                // ManyToMany → remember expected join table
-                foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
-                    /** @var ManyToMany $meta */
-                    $meta = $attr->newInstance();
-                    if ($meta->joinTable instanceof JoinTable) {
-                        $jt = $meta->joinTable;
-                        $seenJoinTables[$jt->name] = true;
-                        $targetTable = $this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '');
-                        $ownerPk  = $primaryKeyNames[$table] ?? 'id';
-                        $targetPk = $primaryKeyNames[$targetTable] ?? 'id';
-
-                        $joinTableStmts[$jt->name] =
-                            "CREATE TABLE IF NOT EXISTS {$q($jt->name)} (\n"
-                            . "    {$q($jt->joinColumn)} INT NOT NULL,\n"
-                            . "    {$q($jt->inverseColumn)} INT NOT NULL,\n"
-                            . "    PRIMARY KEY ({$q($jt->joinColumn)}, {$q($jt->inverseColumn)}),\n"
-                            . "    FOREIGN KEY ({$q($jt->joinColumn)})   REFERENCES {$q($table)}({$q($ownerPk)})   ON DELETE CASCADE,\n"
-                            . "    FOREIGN KEY ({$q($jt->inverseColumn)}) REFERENCES {$q($targetTable)}({$q($targetPk)}) ON DELETE CASCADE\n"
-                            . ")" . $this->dialect->engineSuffix() . ";";
-                    }
-                    $skipCols[] = $propName;
-                }
-
-                // One-to-One inverse side => skip
-                foreach ($prop->getAttributes(OneToOne::class) as $a) {
-                    $o2o = $a->newInstance();
-                    if ($o2o->mappedBy) {
-                        $skipCols[] = $propName;
-                    }
-                }
-
-                // One-to-Many inverse => skip
-                if ($prop->getAttributes(OneToMany::class)) {
-                    $skipCols[] = $propName;
-                }
-
-                // Many-to-One owning side: FK col honours nullable AND type
-                if ($prop->getAttributes(ManyToOne::class)) {
-                    $m2o   = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
-                    $fkCol = str_ends_with($propName, '_id') ? $propName : $propName . '_id';
-
-                    // If this FK column is also the PK, don't re-add it (shared PK/FK pattern)
-                    if ($fkCol === $pkName) {
-                        $skipCols[] = $propName;
-                        continue;
-                    }
-
-                    $expectedCols[$fkCol] = true;
-
-                    if (!in_array($fkCol, $existingCols, true)) {
-                        $null        = $m2o->nullable ? ' NULL' : ' NOT NULL';
-                        $targetTable = $entityTableMap[$m2o->targetEntity] ?? $this->snake($m2o->targetEntity);
-                        $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
-                        $fkType      = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
-                            ? $this->dialect->uuidFkType()
-                            : $this->dialect->intFkType();
-
-                        $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($fkCol)} {$fkType}{$null}";
-                        $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q($targetPk)})" . ($m2o->nullable ? ' ON DELETE SET NULL' : '');
-                    } else {
-                        /* FK column already exists → compare type & nullability */
-                        $colMeta      = $schema[$table][$fkCol] ?? null;
-                        $haveNullable = (bool) ($colMeta['nullable'] ?? false);
-                        $targetTable  = $entityTableMap[$m2o->targetEntity] ?? $this->snake($m2o->targetEntity);
-                        $fkType       = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
-                            ? $this->dialect->uuidFkType()
-                            : $this->dialect->intFkType();
-
-                        // mapType handles standardizing e.g. 'int' to 'INT' or 'string' to 'VARCHAR(255)'
-                        $haveBase = $this->dialect->mapType($colMeta['type'] ?? '', $colMeta['length'] ?? null);
-                        $wantBase = $fkType;
-
-                        if ($m2o->nullable !== $haveNullable || $wantBase !== $haveBase) {
-                            $alterStmts[] = $this->dialect->alterColumnSql(
-                                $table,
-                                $fkCol,
-                                $wantBase,
-                                $m2o->nullable,
-                                '', // no default for FK
-                            );
-                        }
-                    }
-                    $skipCols[] = $propName;
+            $columns = [];
+            foreach ($cols as $colName => $colMeta) {
+                if (!is_string($colName) || !is_array($colMeta)) {
                     continue;
                 }
 
-                // One-to-One owning side (no mappedBy): FK col honours nullable AND type
-                if ($prop->getAttributes(OneToOne::class)) {
-                    $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
-                    if (!$o2o->mappedBy) {
-                        $fkCol = str_ends_with($propName, '_id') ? $propName : $propName . '_id';
+                $type = strtolower(
+                    (string) ($colMeta['Type'] ?? $colMeta['type'] ?? $colMeta['DATA_TYPE'] ?? 'varchar'),
+                );
 
-                        // If this FK column is also the PK, don't re-add it (shared PK/FK pattern)
-                        if ($fkCol === $pkName) {
-                            $skipCols[] = $propName;
-                            continue;
-                        }
+                // Normalize nullable from multiple possible key formats
+                $nullableRaw = $colMeta['nullable'] ?? $colMeta['Null'] ?? $colMeta['is_nullable'] ?? false;
+                $nullable = is_bool($nullableRaw)
+                    ? $nullableRaw
+                    : in_array(strtoupper((string) $nullableRaw), ['YES', 'TRUE', '1'], true);
 
-                        $expectedCols[$fkCol] = true;
-
-                        if (!in_array($fkCol, $existingCols, true)) {
-                            $null        = $o2o->nullable ? ' NULL' : ' NOT NULL';
-                            $targetTable = $entityTableMap[$o2o->targetEntity] ?? $this->snake($o2o->targetEntity);
-                            $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
-                            $fkType      = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
-                                ? $this->dialect->uuidFkType()
-                                : $this->dialect->intFkType();
-
-                            $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($fkCol)} {$fkType}{$null}";
-                            $alterStmts[] = "ALTER TABLE {$q($table)} ADD CONSTRAINT {$q("fk_{$table}_{$fkCol}")} FOREIGN KEY ({$q($fkCol)}) REFERENCES {$q($targetTable)}({$q($targetPk)})" . ($o2o->nullable ? ' ON DELETE SET NULL' : '');
-                        } else {
-                            /* FK column already exists → compare type & nullability */
-                            $colMeta      = $schema[$table][$fkCol] ?? null;
-                            $haveNullable = (bool) ($colMeta['nullable'] ?? false);
-                            $targetTable  = $entityTableMap[$o2o->targetEntity] ?? $this->snake($o2o->targetEntity);
-                            $fkType       = isset($primaryKeyTypes[$targetTable]) && $primaryKeyTypes[$targetTable] === 'uuid'
-                                ? $this->dialect->uuidFkType()
-                                : $this->dialect->intFkType();
-
-                            $haveBase = $this->dialect->mapType($colMeta['type'] ?? '', $colMeta['length'] ?? null);
-                            $wantBase = $fkType;
-
-                            if ($o2o->nullable !== $haveNullable || $wantBase !== $haveBase) {
-                                $alterStmts[] = $this->dialect->alterColumnSql(
-                                    $table,
-                                    $fkCol,
-                                    $wantBase,
-                                    $o2o->nullable,
-                                    '', // no default for FK
-                                );
-                            }
-                        }
-                        $skipCols[] = $propName;
-                        continue;
-                    }
-                }
-
-                // Primary key — skip (already in $expectedCols)
-                if ($propName === $pkName) {
-                    $expectedCols[$pkName] = true;
-                    continue;
-                }
-
-                // Scalar #[Field]
-                foreach ($prop->getAttributes(FieldAttr::class) as $fa) {
-                    if (in_array($propName, $skipCols, true)) {
-                        continue 2;
-                    }
-                    $expectedCols[$propName] = true;
-
-                    $field        = $fa->newInstance();
-                    $wantNullable = (bool) ($field->nullable ?? false);
-                    $enumValues   = $field->enumValues ?? null;
-                    $wantBase     = $this->dialect->mapType($field->type ?? 'string', $field->length ?? null, $enumValues);
-                    $wantDefault  = $field->default ?? null;
-                    $wantSql      = "{$wantBase} " . ($wantNullable ? 'NULL' : 'NOT NULL')
-                        . $this->renderDefault($wantDefault, $field->type ?? 'string');
-
-                    if (!in_array($propName, $existingCols, true)) {
-                        /* ① brand-new column */
-                        $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($propName)} {$wantSql}";
-                    } else {
-                        /* ② column already present → compare & modify */
-                        $colMeta      = $schema[$table][$propName] ?? null;
-                        $haveNullable = (bool) ($colMeta['nullable'] ?? false);
-                        $haveBase     = $this->dialect->mapType($colMeta['type'] ?? '', $colMeta['length'] ?? null);
-                        $haveDefault  = $colMeta['default'] ?? null;
-
-                        // Normalize booleans for comparison:
-                        // '0' or 0 -> false/FALSE; '1' or 1 -> true/TRUE
-                        $wantNorm = $wantDefault;
-                        $haveNorm = $haveDefault;
-
-                        if (strtolower($field->type ?? 'string') === 'boolean' || strtolower($field->type ?? 'string') === 'bool') {
-                            if ($wantDefault !== null) {
-                                $wantNorm = $wantDefault ? 'TRUE' : 'FALSE';
-                            }
-                            if ($haveDefault !== null) {
-                                // DB might return '0'/'1', 0/1, or 'true'/'false'
-                                if ($haveDefault === '0' || $haveDefault === 0 || strcasecmp((string)$haveDefault, 'false') === 0) {
-                                    $haveNorm = 'FALSE';
-                                } elseif ($haveDefault === '1' || $haveDefault === 1 || strcasecmp((string)$haveDefault, 'true') === 0) {
-                                    $haveNorm = 'TRUE';
-                                }
-                            }
-                        }
-
-                        if (
-                            $wantNullable !== $haveNullable
-                            || $wantBase     !== $haveBase
-                            || $wantNorm     !== $haveNorm
-                        ) {
-                            $defaultClause = $this->renderDefault($wantDefault, $field->type ?? 'string');
-                            $alterStmts[] = $this->dialect->alterColumnSql(
-                                $table,
-                                $propName,
-                                $wantBase,
-                                $wantNullable,
-                                $defaultClause,
-                            );
-                        }
-                    }
-                }
-
-                // #[Column] override
-                if ($prop->getAttributes(ColumnAttr::class)) {
-                    if (in_array($propName, $skipCols, true)) {
-                        continue;
-                    }
-                    $expectedCols[$propName] = true;
-
-                    if (!in_array($propName, $existingCols, true)) {
-                        $attr    = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
-                        $sqlType = strtoupper($attr->type ?? 'VARCHAR');
-                        $length  = $attr->length ? "({$attr->length})" : '';
-                        $null    = $attr->nullable ? ' NULL' : ' NOT NULL';
-                        $alterStmts[] = "ALTER TABLE {$q($table)} ADD COLUMN {$q($propName)} {$sqlType}{$length}{$null}";
-                    }
-                }
+                $columns[$colName] = new \MonkeysLegion\Migration\Schema\ColumnDefinition(
+                    name:     $colName,
+                    type:     $type,
+                    nullable: $nullable,
+                    default:  $colMeta['Default'] ?? $colMeta['column_default'] ?? null,
+                );
             }
 
-            // ➋ DROP logic: anything in $existingCols not in $expectedCols should be dropped.
-            $metadataCols = ['COLUMN_NAME', 'COLUMN_TYPE', 'IS_NULLABLE'];
-            foreach ($existingCols as $col) {
-                if ($col === $pkName) continue;
-                if (in_array(strtoupper($col), $metadataCols, true)) continue;
-                if (!isset($expectedCols[$col])) {
-                    if (str_ends_with($col, '_id')) {
-                        $fkName = $this->fkName($table, $col);
-                        if ($fkName) {
-                            $alterStmts[] = $this->dialect->dropForeignKeySql($table, $fkName);
-                        }
-                    }
-                    $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
-                    $alterStmts[] = "ALTER TABLE {$q($table)} DROP COLUMN {$q($col)}{$cascade}";
-                }
-            }
+            $tables[$tableName] = new \MonkeysLegion\Migration\Schema\TableDefinition(
+                name:    $tableName,
+                columns: $columns,
+            );
         }
 
-        // ➊ DROP tables that are not expected
-        $dropStmts = [];
-
-        foreach (array_keys($schema) as $tbl) {
-            if (in_array($tbl, $this->protectedTables, true)) {
-                continue;
-            }
-
-            $isEntityExpected = isset($seenEntityTables[$tbl]);
-            $isJoinExpected   = isset($seenJoinTables[$tbl]);
-
-            if (! $isEntityExpected && ! $isJoinExpected) {
-                $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
-                $dropStmts[] = "DROP TABLE IF EXISTS {$q($tbl)}{$cascade}";
-            }
-        }
-
-        // Compose final SQL — order: CREATE/ALTER first, JOIN tables, then DROPs last.
-        // This ensures new tables and FK constraints are created before
-        // orphaned tables are dropped (important with CASCADE on PG).
-        $disableFk = $this->dialect->disableFkChecks();
-        $enableFk  = $this->dialect->enableFkChecks();
-
-        $parts = [];
-
-        // ① CREATE + ALTER statements
-        if ($alterStmts) {
-            $alterSql = implode(";\n", $alterStmts);
-            if (!str_ends_with($alterSql, ';')) {
-                $alterSql .= ';';
-            }
-            if ($disableFk !== '' && $enableFk !== '') {
-                $alterSql = "{$disableFk}\n{$alterSql}\n{$enableFk}";
-            }
-            $parts[] = $alterSql;
-        }
-
-        // ② JOIN table creates
-        if ($joinTableStmts) {
-            $parts[] = implode("\n", $joinTableStmts);
-        }
-
-        // ③ DROP statements (always last)
-        if ($dropStmts) {
-            $dropSql = implode(";\n", $dropStmts);
-            if (!str_ends_with($dropSql, ';')) {
-                $dropSql .= ';';
-            }
-            if ($disableFk !== '' && $enableFk !== '') {
-                $dropSql = "{$disableFk}\n{$dropSql}\n{$enableFk}";
-            }
-            $parts[] = $dropSql;
-        }
-
-        $sql = implode("\n\n", $parts);
-
-        return $sql === '' ? '' : rtrim($sql, ";\n") . ';';
-    }
-
-    // ─── private helpers ────────────────────────────────────────────
-
-    /**
-     * Create a SQL CREATE TABLE statement for the given entity class.
-     */
-    private function createTableSql(ReflectionClass $ref, string $table): string
-    {
-        $q    = fn(string $id): string => $this->dialect->quoteIdentifier($id);
-        $cols = $this->getColumnDefinitions($ref);
-        $defs = implode(",\n  ", $cols);
-
-        // Find primary key via #[Id] attribute, fallback to #[Field(primaryKey:true)]
-        $primaryKey = 'id'; // default fallback
-        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-            if ($prop->getAttributes(IdAttr::class)) {
-                $primaryKey = $prop->getName();
-                break;
-            }
-            $attrs = $prop->getAttributes(FieldAttr::class);
-            if ($attrs) {
-                $attr = $attrs[0]->newInstance();
-                if ($attr->primaryKey) {
-                    $primaryKey = $prop->getName();
-                    break;
-                }
-            }
-        }
-
-        $suffix = $this->dialect->engineSuffix();
-        $suffix = $suffix ? "\n{$suffix}" : '';
-
-        return <<<SQL
-CREATE TABLE {$q($table)} (
-  {$defs},
-  PRIMARY KEY ({$q($primaryKey)})
-){$suffix}
-SQL;
-    }
-
-    /**
-     * Extract scalar column definitions based on Field attributes.
-     */
-    private function getColumnDefinitions(ReflectionClass $ref): array
-    {
-        $q    = fn(string $id): string => $this->dialect->quoteIdentifier($id);
-        $defs = [];
-
-        // First pass: detect primary key name and type
-        $primaryKeyType = 'int';
-        $primaryKeyName = 'id';
-        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-            if ($prop->getAttributes(IdAttr::class)) {
-                $primaryKeyName = $prop->getName();
-                $fieldAttrs = $prop->getAttributes(FieldAttr::class);
-                if ($fieldAttrs) {
-                    $primaryKeyType = $fieldAttrs[0]->newInstance()->type ?? 'int';
-                }
-                break;
-            }
-            $attrs = $prop->getAttributes(FieldAttr::class);
-            if ($attrs) {
-                $attr = $attrs[0]->newInstance();
-                if ($attr->primaryKey) {
-                    $primaryKeyName = $prop->getName();
-                    $primaryKeyType = $attr->type ?? 'int';
-                    break;
-                }
-            }
-        }
-
-        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-            $name = $prop->getName();
-
-            // Skip pure inverse relations & Many-to-Many
-            if (
-                $prop->getAttributes(OneToMany::class)
-                || ($prop->getAttributes(OneToOne::class)
-                    && $prop->getAttributes(OneToOne::class)[0]->newInstance()->mappedBy)
-                || $prop->getAttributes(ManyToMany::class)
-            ) {
-                continue;
-            }
-
-            /* Many-to-One owning side → FK column with correct type */
-            if ($prop->getAttributes(ManyToOne::class)) {
-                $m2o      = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
-                $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
-
-                // Skip if this FK column is the PK (shared PK/FK pattern);
-                // the PK will be emitted by the #[Field] handler below.
-                if ($colName === $primaryKeyName) {
-                    continue;
-                }
-
-                $nullable = $m2o->nullable ? ' NULL' : ' NOT NULL';
-
-                $targetClass  = new ReflectionClass($m2o->targetEntity);
-                $targetPkType = 'int';
-                foreach ($targetClass->getProperties() as $targetProp) {
-                    if ($targetProp->getAttributes(IdAttr::class)) {
-                        $fa = $targetProp->getAttributes(FieldAttr::class);
-                        $targetPkType = $fa ? ($fa[0]->newInstance()->type ?? 'int') : 'int';
-                        break;
-                    }
-                    $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
-                    if ($targetAttrs) {
-                        $targetAttr = $targetAttrs[0]->newInstance();
-                        if ($targetAttr->primaryKey) {
-                            $targetPkType = $targetAttr->type ?? 'int';
-                            break;
-                        }
-                    }
-                }
-
-                $fkType = $targetPkType === 'uuid'
-                    ? $this->dialect->uuidFkType()
-                    : $this->dialect->intFkType();
-                $defs[$colName] = "{$q($colName)} {$fkType}{$nullable}";
-                continue;
-            }
-
-            /* One-to-One owning side → FK column with correct type */
-            if ($prop->getAttributes(OneToOne::class)) {
-                $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
-                if (!$o2o->mappedBy) {
-                    $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
-
-                    // Skip if this FK column is the PK (shared PK/FK pattern)
-                    if ($colName === $primaryKeyName) {
-                        continue;
-                    }
-
-                    $nullable = $o2o->nullable ? ' NULL' : ' NOT NULL';
-
-                    $targetClass  = new ReflectionClass($o2o->targetEntity);
-                    $targetPkType = 'int';
-                    foreach ($targetClass->getProperties() as $targetProp) {
-                        if ($targetProp->getAttributes(IdAttr::class)) {
-                            $fa = $targetProp->getAttributes(FieldAttr::class);
-                            $targetPkType = $fa ? ($fa[0]->newInstance()->type ?? 'int') : 'int';
-                            break;
-                        }
-                        $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
-                        if ($targetAttrs) {
-                            $targetAttr = $targetAttrs[0]->newInstance();
-                            if ($targetAttr->primaryKey) {
-                                $targetPkType = $targetAttr->type ?? 'int';
-                                break;
-                            }
-                        }
-                    }
-
-                    $fkType = $targetPkType === 'uuid'
-                        ? $this->dialect->uuidFkType()
-                        : $this->dialect->intFkType();
-                    $defs[$colName] = "{$q($colName)} {$fkType}{$nullable}";
-                    continue;
-                }
-            }
-
-            /* Scalar field with #[Field] attribute */
-            $attrs = $prop->getAttributes(FieldAttr::class);
-            if ($attrs) {
-                $fa         = $attrs[0]->newInstance();
-                $type       = $fa->type ?? 'string';
-                $length     = $fa->length ?? null;
-                $nullable   = (bool)($fa->nullable ?? false);
-                $enumValues = $fa->enumValues ?? null;
-                $autoInc    = $fa->autoIncrement;
-
-                if ($autoInc) {
-                    // For PG use SERIAL/BIGSERIAL; for MySQL keep type + AUTO_INCREMENT keyword
-                    $sqlBase       = $this->dialect->autoIncrementType($type);
-                    $nullSuffix    = $nullable ? ' NULL' : ' NOT NULL';
-                    $autoIncSuffix = $this->dialect->autoIncrementKeyword();
-                    $defs[$name]   = "{$q($name)} {$sqlBase}{$nullSuffix}{$autoIncSuffix}"
-                        . $this->renderDefault($fa->default ?? null, $type);
-                } else {
-                    $sqlType     = $this->dialect->mapTypeWithNullability($type, $length, $nullable, $enumValues);
-                    $defs[$name] = "{$q($name)} {$sqlType}"
-                        . $this->renderDefault($fa->default ?? null, $type);
-                }
-                continue;
-            }
-
-            /* #[Column] override */
-            $colAttrs = $prop->getAttributes(ColumnAttr::class);
-            if ($colAttrs) {
-                /** @var ColumnAttr $attr */
-                $attr     = $colAttrs[0]->newInstance();
-                $sqlType  = strtoupper($attr->type ?? 'VARCHAR');
-                $length   = $attr->length ? "({$attr->length})" : '';
-                $nullable = $attr->nullable ? ' NULL' : ' NOT NULL';
-                $defs[$name] = "{$q($name)} {$sqlType}{$length}{$nullable}"
-                    . $this->renderDefault($attr->default ?? null, $attr->type ?? 'string');
-                continue;
-            }
-
-            /* Fallback for properties without attributes */
-            $type    = $prop->getType()?->getName() ?? 'string';
-            $sqlType = $this->dialect->mapTypeWithNullability($type);
-            $defs[$name] = "{$q($name)} {$sqlType}";
-        }
-
-        return $defs;
-    }
-
-    /**
-     * Generate a reverse migration SQL from the given SQL.
-     * Handles both backtick (MySQL) and double-quote (PG) identifier quoting.
-     */
-    private function autoReverse(string $sql): string
-    {
-        $q     = fn(string $id): string => $this->dialect->quoteIdentifier($id);
-        $lines = array_filter(array_map('trim', explode("\n", $sql)));
-        $out   = [];
-
-        // Pattern matches both `name` and "name"
-        $idPat = '[`"](\w+)[`"]';
-
-        foreach ($lines as $line) {
-            $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
-            if (preg_match('/^CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+' . $idPat . '/i', $line, $m)) {
-                $out[] = "DROP TABLE IF EXISTS {$q($m[1])}{$cascade};";
-            } elseif (preg_match('/^ALTER\s+TABLE\s+' . $idPat . '\s+ADD\s+COLUMN\s+' . $idPat . '/i', $line, $m)) {
-                $out[] = "ALTER TABLE {$q($m[1])} DROP COLUMN {$q($m[2])}{$cascade};";
-            } else {
-                $out[] = "-- TODO reverse: {$line}";
-            }
-        }
-
-        return implode("\n", $out);
-    }
-
-    /**
-     * Look up the FK constraint name for a given table + column.
-     */
-    private function fkName(string $table, string $column): ?string
-    {
-        $sql    = $this->dialect->foreignKeyLookupSql();
-        $params = $this->dialect->foreignKeyLookupParams($table, $column);
-
-        $stmt = $this->db->pdo()->prepare($sql);
-        $stmt->execute($params);
-        return $stmt->fetchColumn() ?: null;
-    }
-
-    /**
-     * Convert a fully qualified class name to a snake_case table name.
-     */
-    private function snake(string $class): string
-    {
-        $base = str_contains($class, '\\') ? substr($class, strrpos($class, '\\') + 1) : $class;
-        return strtolower(preg_replace('/([a-z])([A-Z])/', '$1_$2', $base));
-    }
-
-    /** Is this property a relation attribute? */
-    private function isRelation(ReflectionProperty $p): bool
-    {
-        return $p->getAttributes(OneToOne::class)
-            || $p->getAttributes(OneToMany::class)
-            || $p->getAttributes(ManyToOne::class)
-            || $p->getAttributes(ManyToMany::class);
-    }
-
-    private function formatEnumValues(array $values): string
-    {
-        return implode(',', array_map(fn($v) => "'" . addslashes((string) $v) . "'", $values));
-    }
-
-    private function renderDefault(mixed $value, string $phpType): string
-    {
-        if ($value === null) {
-            return '';
-        }
-
-        $phpTypeLower = strtolower($phpType);
-
-        // Boolean: render TRUE / FALSE explicitly (handles PHP false → '' cast)
-        if ($phpTypeLower === 'boolean' || $phpTypeLower === 'bool') {
-            return ' DEFAULT ' . ($value ? 'TRUE' : 'FALSE');
-        }
-
-        // For ENUM and SET, the value should be a simple quoted string
-        if ($phpTypeLower === 'enum' || $phpTypeLower === 'set') {
-            return " DEFAULT '" . (string) $value . "'";
-        }
-
-        // quote strings / JSON – leave numbers & booleans alone
-        $needsQuotes = match ($phpTypeLower) {
-            'string', 'text', 'char', 'uuid', 'json', 'simple_json',
-            'array', 'simple_array' => true,
-            default => false,
-        };
-
-        $literal = $needsQuotes ? $this->db->pdo()->quote((string) $value)
-            : (string) $value;
-
-        return " DEFAULT {$literal}";
+        return $tables;
     }
 }

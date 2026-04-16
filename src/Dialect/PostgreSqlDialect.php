@@ -1,39 +1,48 @@
 <?php
-
 declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Dialect;
 
+use MonkeysLegion\Migration\Security\IdentifierValidator;
+
 /**
+ * MonkeysLegion Framework — Migration Package
+ *
  * PostgreSQL-specific SQL generation.
  *
  * Key differences from MySQL:
- *  - double-quote identifiers instead of backticks
+ *  - Double-quote identifiers instead of backticks
  *  - SERIAL / BIGSERIAL instead of AUTO_INCREMENT
  *  - BOOLEAN instead of TINYINT(1)
- *  - TEXT instead of MEDIUMTEXT / LONGTEXT
- *  - TIMESTAMP instead of DATETIME
- *  - BYTEA instead of BLOB
- *  - INTEGER instead of YEAR
- *  - BIGINT (no UNSIGNED) instead of BIGINT UNSIGNED
- *  - VARCHAR(255) + CHECK instead of ENUM(…)
- *  - TEXT instead of SET(…)
  *  - JSONB instead of JSON
- *  - SMALLINT instead of TINYINT
- *  - no ENGINE=… suffix
- *  - ALTER COLUMN … TYPE / SET NOT NULL / SET DEFAULT instead of MODIFY COLUMN
+ *  - BYTEA instead of BLOB
+ *  - ALTER COLUMN … TYPE / SET NOT NULL syntax
  *  - DROP CONSTRAINT instead of DROP FOREIGN KEY
- *  - no FK-check toggling needed (PG DDL is transactional)
+ *  - Transactional DDL support
+ *  - Native INET / MACADDR / UUID types
+ *  - GIN / GIST index types for JSONB / full-text
+ *
+ * @copyright 2026 MonkeysCloud Team
+ * @license   MIT
  */
 final class PostgreSqlDialect implements SqlDialect
 {
+    // ── Identifier quoting ─────────────────────────────────────────
+
     public function quoteIdentifier(string $name): string
     {
+        IdentifierValidator::validate($name);
+
         return "\"{$name}\"";
     }
 
-    public function mapType(string $logicalType, int|string|null $length = null, ?array $enumValues = null): string
-    {
+    // ── Type mapping ───────────────────────────────────────────────
+
+    public function mapType(
+        string $logicalType,
+        int|string|null $length = null,
+        ?array $enumValues = null,
+    ): string {
         return match (strtolower($logicalType)) {
             'string'             => 'VARCHAR(' . ($length ?? 255) . ')',
             'char'               => 'CHAR(' . ($length ?? 1) . ')',
@@ -56,18 +65,19 @@ final class PostgreSqlDialect implements SqlDialect
             'timestamptz'        => 'TIMESTAMPTZ',
             'year'               => 'INTEGER',
             'uuid'               => 'UUID',
-            'binary'             => 'BYTEA',
+            'ulid'               => 'CHAR(26)',
+            'binary', 'blob'     => 'BYTEA',
             'json'               => 'JSONB',
             'simple_json', 'array', 'simple_array' => 'TEXT',
             'enum'               => $this->pgEnumType($enumValues, $length),
             'set'                => 'TEXT',
-            // Native PG geometric types (no PostGIS required)
             'geometry'           => 'BYTEA',
             'point'              => 'POINT',
             'linestring'         => 'PATH',
             'polygon'            => 'POLYGON',
             'ipaddress'          => 'INET',
             'macaddress'         => 'MACADDR',
+            'vector'             => 'JSONB',
             default              => 'VARCHAR(' . ($length ?? 255) . ')',
         };
     }
@@ -79,26 +89,34 @@ final class PostgreSqlDialect implements SqlDialect
         ?array $enumValues = null,
     ): string {
         $null = $nullable ? ' NULL' : ' NOT NULL';
+
         return $this->mapType($logicalType, $length, $enumValues) . $null;
     }
 
+    // ── Table DDL ──────────────────────────────────────────────────
+
     public function engineSuffix(): string
     {
-        return ''; // PostgreSQL has no ENGINE clause
+        return '';
     }
+
+    // ── Auto-increment ─────────────────────────────────────────────
 
     public function autoIncrementKeyword(): string
     {
-        return ''; // PG uses SERIAL types, no separate keyword
+        return '';
     }
 
     public function autoIncrementType(string $baseType): string
     {
         return match (strtolower($baseType)) {
             'bigint', 'unsignedbigint' => 'BIGSERIAL',
+            'smallint'                 => 'SMALLSERIAL',
             default                    => 'SERIAL',
         };
     }
+
+    // ── Foreign key operations ─────────────────────────────────────
 
     public function foreignKeyLookupSql(): string
     {
@@ -110,7 +128,7 @@ SELECT tc.constraint_name
    AND tc.table_schema    = kcu.table_schema
  WHERE tc.constraint_type = 'FOREIGN KEY'
    AND tc.table_catalog   = current_database()
-   AND tc.table_schema    = 'public'
+   AND tc.table_schema    = current_schema()
    AND tc.table_name      = :tbl
    AND kcu.column_name    = :col
  LIMIT 1
@@ -122,47 +140,9 @@ SQL;
         return ['tbl' => $table, 'col' => $column];
     }
 
-    public function disableFkChecks(): string
-    {
-        // PG DDL is transactional — no superuser-only toggle needed.
-        // If the migration runner wraps in a transaction, failures simply roll back.
-        return '';
-    }
-
-    public function enableFkChecks(): string
-    {
-        return '';
-    }
-
-    public function alterColumnSql(
-        string $table,
-        string $column,
-        string $baseType,
-        bool   $nullable,
-        string $defaultClause,
-    ): string {
-        // PG requires separate sub-clauses inside one ALTER TABLE:
-        //   ALTER COLUMN "c" TYPE <type>,
-        //   ALTER COLUMN "c" SET/DROP NOT NULL
-        //   [, ALTER COLUMN "c" SET/DROP DEFAULT …]
-        $parts   = [];
-        $parts[] = "ALTER COLUMN \"{$column}\" TYPE {$baseType}";
-        $parts[] = $nullable
-            ? "ALTER COLUMN \"{$column}\" DROP NOT NULL"
-            : "ALTER COLUMN \"{$column}\" SET NOT NULL";
-
-        if ($defaultClause !== '') {
-            // $defaultClause arrives as " DEFAULT <value>"; extract the value.
-            $defaultValue = preg_replace('/^\s*DEFAULT\s+/i', '', $defaultClause);
-            $parts[] = "ALTER COLUMN \"{$column}\" SET DEFAULT {$defaultValue}";
-        }
-
-        return "ALTER TABLE \"{$table}\" " . implode(', ', $parts);
-    }
-
     public function dropForeignKeySql(string $table, string $fkName): string
     {
-        return "ALTER TABLE \"{$table}\" DROP CONSTRAINT \"{$fkName}\"";
+        return "ALTER TABLE {$this->quoteIdentifier($table)} DROP CONSTRAINT {$this->quoteIdentifier($fkName)}";
     }
 
     public function uuidFkType(): string
@@ -175,11 +155,80 @@ SQL;
         return 'INTEGER';
     }
 
-    // ── helpers ────────────────────────────────────────────────────
+    // ── FK check toggling ──────────────────────────────────────────
+
+    public function disableFkChecks(): string
+    {
+        return '';
+    }
+
+    public function enableFkChecks(): string
+    {
+        return '';
+    }
+
+    // ── Column operations ──────────────────────────────────────────
+
+    public function alterColumnSql(
+        string $table,
+        string $column,
+        string $baseType,
+        bool   $nullable,
+        string $defaultClause,
+    ): string {
+        $parts   = [];
+        $qColumn = $this->quoteIdentifier($column);
+        $parts[] = "ALTER COLUMN {$qColumn} TYPE {$baseType}";
+        $parts[] = $nullable
+            ? "ALTER COLUMN {$qColumn} DROP NOT NULL"
+            : "ALTER COLUMN {$qColumn} SET NOT NULL";
+
+        if ($defaultClause !== '') {
+            $defaultValue = preg_replace('/^\s*DEFAULT\s+/i', '', $defaultClause);
+            $parts[] = "ALTER COLUMN {$qColumn} SET DEFAULT {$defaultValue}";
+        }
+
+        return "ALTER TABLE {$this->quoteIdentifier($table)} " . implode(', ', $parts);
+    }
+
+    public function renameColumnSql(string $table, string $from, string $to): string
+    {
+        return sprintf(
+            'ALTER TABLE %s RENAME COLUMN %s TO %s',
+            $this->quoteIdentifier($table),
+            $this->quoteIdentifier($from),
+            $this->quoteIdentifier($to),
+        );
+    }
+
+    // ── Index operations ───────────────────────────────────────────
+
+    public function dropIndexSql(string $table, string $indexName): string
+    {
+        return "DROP INDEX {$this->quoteIdentifier($indexName)}";
+    }
+
+    // ── Transaction support ────────────────────────────────────────
+
+    public function supportsTransactionalDdl(): bool
+    {
+        return true;
+    }
+
+    // ── Table comment ──────────────────────────────────────────────
+
+    public function tableCommentSql(string $table, string $comment): string
+    {
+        $escaped = str_replace("'", "''", $comment);
+
+        return "COMMENT ON TABLE {$this->quoteIdentifier($table)} IS '{$escaped}'";
+    }
+
+    // ── Private helpers ────────────────────────────────────────────
 
     /**
-     * PostgreSQL has no native ENUM in DDL.
-     * Map to VARCHAR(255); the caller can apply a CHECK constraint.
+     * PostgreSQL has no native ENUM in CREATE TABLE DDL.
+     * Map to VARCHAR(255); callers should apply CHECK constraints if needed.
      */
     private function pgEnumType(?array $enumValues, int|string|null $length): string
     {

@@ -8,15 +8,23 @@ use MonkeysLegion\Migration\Security\IdentifierValidator;
 /**
  * MonkeysLegion Framework — Migration Package
  *
- * MySQL-specific SQL generation.
+ * SQLite-specific SQL generation.
  *
- * Covers: backtick quoting, ENGINE=InnoDB, AUTO_INCREMENT, MySQL type
- * mappings, index management, FK operations, and column renaming.
+ * SQLite limitations handled:
+ *  - No ALTER COLUMN (only ADD COLUMN supported)
+ *  - No DROP COLUMN before SQLite 3.35.0
+ *  - AUTOINCREMENT on INTEGER PRIMARY KEY only
+ *  - Type affinity instead of strict types
+ *  - No native ENUM, SET, UUID, INET types
+ *  - No table ENGINE or charset
+ *  - Transactional DDL is supported
+ *
+ * Ideal for testing without an external database server.
  *
  * @copyright 2026 MonkeysCloud Team
  * @license   MIT
  */
-final class MySqlDialect implements SqlDialect
+final class SqliteDialect implements SqlDialect
 {
     // ── Identifier quoting ─────────────────────────────────────────
 
@@ -24,7 +32,7 @@ final class MySqlDialect implements SqlDialect
     {
         IdentifierValidator::validate($name);
 
-        return "`{$name}`";
+        return "\"{$name}\"";
     }
 
     // ── Type mapping ───────────────────────────────────────────────
@@ -34,46 +42,26 @@ final class MySqlDialect implements SqlDialect
         int|string|null $length = null,
         ?array $enumValues = null,
     ): string {
+        // SQLite uses type affinity — we map to the closest affinity
         return match (strtolower($logicalType)) {
-            'string'             => 'VARCHAR(' . ($length ?? 255) . ')',
-            'char'               => 'CHAR(' . ($length ?? 1) . ')',
-            'text'               => 'TEXT',
-            'mediumtext'         => 'MEDIUMTEXT',
-            'longtext'           => 'LONGTEXT',
-            'int', 'integer'     => 'INT',
-            'tinyint'            => 'TINYINT' . ($length ? "($length)" : '(1)'),
-            'smallint'           => 'SMALLINT',
-            'bigint'             => 'BIGINT',
-            'unsignedbigint'     => 'BIGINT UNSIGNED',
-            'decimal'            => 'DECIMAL(' . ($length ?? '10,2') . ')',
-            'float', 'double'    => 'FLOAT',
-            'boolean', 'bool'    => 'TINYINT(1)',
-            'date'               => 'DATE',
-            'time'               => 'TIME',
-            'datetime'           => 'DATETIME',
-            'datetimetz'         => 'DATETIME',
-            'timestamp'          => 'TIMESTAMP',
-            'timestamptz'        => 'TIMESTAMP',
-            'year'               => 'YEAR',
-            'uuid'               => 'CHAR(36)',
-            'ulid'               => 'CHAR(26)',
-            'binary', 'blob'     => 'BLOB',
-            'json'               => 'JSON',
-            'simple_json', 'array', 'simple_array' => 'TEXT',
-            'enum'               => 'ENUM(' . ($enumValues
-                ? $this->formatEnumValues($enumValues)
-                : ($length ?? "'value1','value2'")) . ')',
-            'set'                => 'SET(' . ($enumValues
-                ? $this->formatEnumValues($enumValues)
-                : ($length ?? "'value1','value2'")) . ')',
-            'geometry'           => 'GEOMETRY',
-            'point'              => 'POINT',
-            'linestring'         => 'LINESTRING',
-            'polygon'            => 'POLYGON',
-            'ipaddress'          => 'VARCHAR(45)',
-            'macaddress'         => 'VARCHAR(17)',
-            'vector'             => 'JSON',
-            default              => 'VARCHAR(' . ($length ?? 255) . ')',
+            'string', 'char', 'uuid', 'ulid',
+            'ipaddress', 'macaddress'       => 'TEXT',
+            'text', 'mediumtext', 'longtext' => 'TEXT',
+            'int', 'integer', 'tinyint',
+            'smallint', 'bigint',
+            'unsignedbigint', 'year'         => 'INTEGER',
+            'decimal', 'float', 'double'     => 'REAL',
+            'boolean', 'bool'                => 'INTEGER',
+            'date', 'time', 'datetime',
+            'datetimetz', 'timestamp',
+            'timestamptz'                    => 'TEXT',
+            'binary', 'blob'                 => 'BLOB',
+            'json', 'simple_json', 'array',
+            'simple_array', 'vector'         => 'TEXT',
+            'enum', 'set'                    => 'TEXT',
+            'geometry', 'point',
+            'linestring', 'polygon'          => 'TEXT',
+            default                          => 'TEXT',
         };
     }
 
@@ -92,34 +80,29 @@ final class MySqlDialect implements SqlDialect
 
     public function engineSuffix(): string
     {
-        return ' ENGINE=InnoDB DEFAULT CHARSET=utf8mb4';
+        return '';
     }
 
     // ── Auto-increment ─────────────────────────────────────────────
 
     public function autoIncrementKeyword(): string
     {
-        return ' AUTO_INCREMENT';
+        return '';
     }
 
     public function autoIncrementType(string $baseType): string
     {
-        return $this->mapType($baseType);
+        // SQLite: INTEGER PRIMARY KEY implies AUTOINCREMENT (rowid alias)
+        return 'INTEGER';
     }
 
     // ── Foreign key operations ─────────────────────────────────────
 
     public function foreignKeyLookupSql(): string
     {
-        return <<<'SQL'
-SELECT CONSTRAINT_NAME
-  FROM information_schema.KEY_COLUMN_USAGE
- WHERE TABLE_SCHEMA = DATABASE()
-   AND TABLE_NAME   = :tbl
-   AND COLUMN_NAME  = :col
-   AND REFERENCED_TABLE_NAME IS NOT NULL
- LIMIT 1
-SQL;
+        // SQLite uses PRAGMA, not information_schema
+        // This returns a dummy SQL — actual FK lookup uses PRAGMA foreign_key_list
+        return "SELECT '' AS constraint_name WHERE 0";
     }
 
     public function foreignKeyLookupParams(string $table, string $column): array
@@ -129,29 +112,34 @@ SQL;
 
     public function dropForeignKeySql(string $table, string $fkName): string
     {
-        return "ALTER TABLE {$this->quoteIdentifier($table)} DROP FOREIGN KEY {$this->quoteIdentifier($fkName)}";
+        // SQLite does not support DROP FOREIGN KEY
+        return sprintf(
+            '-- SQLite: Cannot drop FK %s from %s (not supported)',
+            $this->quoteIdentifier($fkName),
+            $this->quoteIdentifier($table),
+        );
     }
 
     public function uuidFkType(): string
     {
-        return 'CHAR(36)';
+        return 'TEXT';
     }
 
     public function intFkType(): string
     {
-        return 'INT';
+        return 'INTEGER';
     }
 
     // ── FK check toggling ──────────────────────────────────────────
 
     public function disableFkChecks(): string
     {
-        return 'SET FOREIGN_KEY_CHECKS=0;';
+        return 'PRAGMA foreign_keys = OFF;';
     }
 
     public function enableFkChecks(): string
     {
-        return 'SET FOREIGN_KEY_CHECKS=1;';
+        return 'PRAGMA foreign_keys = ON;';
     }
 
     // ── Column operations ──────────────────────────────────────────
@@ -163,20 +151,23 @@ SQL;
         bool   $nullable,
         string $defaultClause,
     ): string {
+        // SQLite does not support ALTER COLUMN — requires table rebuild
         $null = $nullable ? ' NULL' : ' NOT NULL';
 
-        return sprintf(
-            'ALTER TABLE %s MODIFY COLUMN %s %s%s%s',
-            $this->quoteIdentifier($table),
-            $this->quoteIdentifier($column),
-            $baseType,
-            $null,
-            $defaultClause,
-        );
+        return "-- SQLite: ALTER COLUMN not supported. "
+            . sprintf(
+                'Would change %s.%s to %s%s%s',
+                $this->quoteIdentifier($table),
+                $this->quoteIdentifier($column),
+                $baseType,
+                $null,
+                $defaultClause,
+            );
     }
 
     public function renameColumnSql(string $table, string $from, string $to): string
     {
+        // Supported since SQLite 3.25.0
         return sprintf(
             'ALTER TABLE %s RENAME COLUMN %s TO %s',
             $this->quoteIdentifier($table),
@@ -189,32 +180,21 @@ SQL;
 
     public function dropIndexSql(string $table, string $indexName): string
     {
-        return "DROP INDEX {$this->quoteIdentifier($indexName)} ON {$this->quoteIdentifier($table)}";
+        return "DROP INDEX IF EXISTS {$this->quoteIdentifier($indexName)}";
     }
 
     // ── Transaction support ────────────────────────────────────────
 
     public function supportsTransactionalDdl(): bool
     {
-        return false;
+        return true;
     }
 
     // ── Table comment ──────────────────────────────────────────────
 
     public function tableCommentSql(string $table, string $comment): string
     {
-        $escaped = addslashes($comment);
-
-        return "ALTER TABLE {$this->quoteIdentifier($table)} COMMENT = '{$escaped}'";
-    }
-
-    // ── Private helpers ────────────────────────────────────────────
-
-    private function formatEnumValues(array $values): string
-    {
-        return implode(',', array_map(
-            fn($v) => "'" . addslashes((string) $v) . "'",
-            $values,
-        ));
+        // SQLite does not support table comments
+        return '';
     }
 }

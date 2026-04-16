@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Tests\Unit\Dialect;
 
+use InvalidArgumentException;
 use MonkeysLegion\Migration\Dialect\PostgreSqlDialect;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
- * @covers \MonkeysLegion\Migration\Dialect\PostgreSqlDialect
  */
+#[CoversClass(\MonkeysLegion\Migration\Dialect\PostgreSqlDialect::class)]
 final class PostgreSqlDialectTest extends TestCase
 {
     private PostgreSqlDialect $dialect;
@@ -26,11 +29,18 @@ final class PostgreSqlDialectTest extends TestCase
         $this->assertSame('"users"', $this->dialect->quoteIdentifier('users'));
     }
 
+    public function testQuoteIdentifierRejectsUnsafeIdentifier(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->dialect->quoteIdentifier('users;DROP');
+    }
+
     // ─── Type mapping ──────────────────────────────────────────────
 
     /**
      * @dataProvider typeProvider
      */
+    #[DataProvider('typeProvider')]
     public function testMapType(string $type, ?int $length, string $expected): void
     {
         $this->assertSame($expected, $this->dialect->mapType($type, $length));
@@ -177,5 +187,53 @@ final class PostgreSqlDialectTest extends TestCase
         $sql = $this->dialect->dropForeignKeySql('orders', 'fk_orders_user_id');
         $this->assertStringContainsString('DROP CONSTRAINT', $sql);
         $this->assertStringContainsString('"orders"', $sql);
+    }
+
+    // ─── v2: Rename column ─────────────────────────────────────────
+
+    public function testRenameColumnSql(): void
+    {
+        $sql = $this->dialect->renameColumnSql('users', 'old_name', 'new_name');
+        $this->assertSame(
+            'ALTER TABLE "users" RENAME COLUMN "old_name" TO "new_name"',
+            $sql,
+        );
+    }
+
+    // ─── v2: Drop index ────────────────────────────────────────────
+
+    public function testDropIndexSql(): void
+    {
+        $sql = $this->dialect->dropIndexSql('users', 'idx_email');
+        $this->assertSame('DROP INDEX "idx_email"', $sql);
+    }
+
+    // ─── v2: Transactional DDL ─────────────────────────────────────
+
+    public function testSupportsTransactionalDdl(): void
+    {
+        $this->assertTrue($this->dialect->supportsTransactionalDdl());
+    }
+
+    // ─── v2: Table comment ─────────────────────────────────────────
+
+    public function testTableCommentSql(): void
+    {
+        $sql = $this->dialect->tableCommentSql('users', 'Users table');
+        $this->assertSame("COMMENT ON TABLE \"users\" IS 'Users table'", $sql);
+    }
+
+    // ─── v2: SMALLSERIAL ───────────────────────────────────────────
+
+    public function testAutoIncrementTypeForSmallInt(): void
+    {
+        $this->assertSame('SMALLSERIAL', $this->dialect->autoIncrementType('smallint'));
+    }
+
+    // ─── v2: ULID type ────────────────────────────────────────────
+
+    public function testUlidType(): void
+    {
+        $this->assertSame('CHAR(26)', $this->dialect->mapType('ulid'));
     }
 }
