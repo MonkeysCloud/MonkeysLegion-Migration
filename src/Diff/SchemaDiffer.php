@@ -167,8 +167,18 @@ final class SchemaDiffer
             return true;
         }
 
+        // Length / precision (e.g. VARCHAR(100) → VARCHAR(255))
+        if ((string) ($desired->length ?? '') !== (string) ($current->length ?? '')) {
+            return true;
+        }
+
         // Nullability
         if ($desired->nullable !== $current->nullable) {
+            return true;
+        }
+
+        // Enum values (e.g. ENUM('a','b') → ENUM('a','b','c'))
+        if ($desired->enumValues !== $current->enumValues) {
             return true;
         }
 

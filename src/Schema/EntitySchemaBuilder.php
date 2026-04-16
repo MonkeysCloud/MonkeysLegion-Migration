@@ -318,7 +318,7 @@ final class EntitySchemaBuilder
                     $joinTables[$jt->name] = new TableDefinition(
                         name:        $jt->name,
                         columns:     $columns,
-                        primaryKey:  $jt->joinColumn,
+                        primaryKey:  [$jt->joinColumn, $jt->inverseColumn],
                         foreignKeys: $foreignKeys,
                     );
                 }
@@ -608,7 +608,7 @@ final class EntitySchemaBuilder
             return;
         }
 
-        $targetTable = $this->snake($m2o->targetEntity);
+        $targetTable = $this->resolveTargetTableName($m2o->targetEntity);
         $targetPk    = $this->pkNameCache[$targetTable] ?? 'id';
         $targetType  = $this->pkTypeCache[$targetTable] ?? 'int';
 
@@ -651,7 +651,7 @@ final class EntitySchemaBuilder
             return;
         }
 
-        $targetTable = $this->snake($o2o->targetEntity);
+        $targetTable = $this->resolveTargetTableName($o2o->targetEntity);
         $targetPk    = $this->pkNameCache[$targetTable] ?? 'id';
         $targetType  = $this->pkTypeCache[$targetTable] ?? 'int';
 
@@ -725,6 +725,23 @@ final class EntitySchemaBuilder
         }
 
         return $prop->getName();
+    }
+
+    /**
+     * Resolve the target table name from a FQCN.
+     *
+     * Uses #[Entity(table: ...)] attribute if present on the target class,
+     * falling back to snake_case of the short class name.
+     */
+    private function resolveTargetTableName(string $fqcn): string
+    {
+        if (class_exists($fqcn)) {
+            $ref = new \ReflectionClass($fqcn);
+            return $this->resolveTableName($ref);
+        }
+
+        // Fallback: snake_case of class name
+        return $this->snake($fqcn);
     }
 
     /**

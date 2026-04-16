@@ -213,7 +213,8 @@ final class SchemaIntrospector
     /** @return array<string, array<string, mixed>> */
     private function columnsMysql(PDO $pdo, string $table): array
     {
-        $stmt = $pdo->query("SHOW COLUMNS FROM `{$table}`");
+        $quotedTable = $this->dialect->quoteIdentifier($table);
+        $stmt = $pdo->query("SHOW COLUMNS FROM {$quotedTable}");
         if (!$stmt) {
             return [];
         }
@@ -264,7 +265,8 @@ final class SchemaIntrospector
     /** @return array<string, array<string, mixed>> */
     private function columnsSqlite(PDO $pdo, string $table): array
     {
-        $stmt = $pdo->query("PRAGMA table_info(\"{$table}\")");
+        $quotedTable = $this->dialect->quoteIdentifier($table);
+        $stmt = $pdo->query("PRAGMA table_info({$quotedTable})");
         if (!$stmt) {
             return [];
         }
@@ -305,7 +307,8 @@ final class SchemaIntrospector
     /** @return list<IndexDefinition> */
     private function indexesMysql(PDO $pdo, string $table): array
     {
-        $stmt = $pdo->query("SHOW INDEX FROM `{$table}`");
+        $quotedTable = $this->dialect->quoteIdentifier($table);
+        $stmt = $pdo->query("SHOW INDEX FROM {$quotedTable}");
         if (!$stmt) {
             return [];
         }
@@ -374,7 +377,8 @@ final class SchemaIntrospector
     /** @return list<IndexDefinition> */
     private function indexesSqlite(PDO $pdo, string $table): array
     {
-        $stmt = $pdo->query("PRAGMA index_list(\"{$table}\")");
+        $quotedTable = $this->dialect->quoteIdentifier($table);
+        $stmt = $pdo->query("PRAGMA index_list({$quotedTable})");
         if (!$stmt) {
             return [];
         }
@@ -385,7 +389,8 @@ final class SchemaIntrospector
             $unique = ((int) ($row['unique'] ?? 0)) === 1;
 
             // Get columns for this index
-            $colStmt = $pdo->query("PRAGMA index_info(\"{$name}\")");
+            $quotedIdx = $this->dialect->quoteIdentifier($name);
+            $colStmt = $pdo->query("PRAGMA index_info({$quotedIdx})");
             $columns = $colStmt ? array_column($colStmt->fetchAll(PDO::FETCH_ASSOC), 'name') : [];
 
             $indexes[] = new IndexDefinition(
@@ -494,7 +499,8 @@ final class SchemaIntrospector
     /** @return list<ForeignKeyDefinition> */
     private function fksSqlite(PDO $pdo, string $table): array
     {
-        $stmt = $pdo->query("PRAGMA foreign_key_list(\"{$table}\")");
+        $quotedTable = $this->dialect->quoteIdentifier($table);
+        $stmt = $pdo->query("PRAGMA foreign_key_list({$quotedTable})");
         if (!$stmt) {
             return [];
         }

@@ -7,7 +7,6 @@ namespace MonkeysLegion\Migration\Tests\Unit\Security;
 use InvalidArgumentException;
 use MonkeysLegion\Migration\Security\IdentifierValidator;
 use PHPUnit\Framework\Attributes\CoversClass;
-use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**

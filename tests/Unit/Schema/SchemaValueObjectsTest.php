@@ -9,7 +9,6 @@ use MonkeysLegion\Migration\Schema\ForeignKeyDefinition;
 use MonkeysLegion\Migration\Schema\IndexDefinition;
 use MonkeysLegion\Migration\Schema\TableDefinition;
 use PHPUnit\Framework\Attributes\CoversClass;
-use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**

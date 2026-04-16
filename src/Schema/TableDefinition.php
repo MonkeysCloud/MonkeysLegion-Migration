@@ -21,7 +21,7 @@ final readonly class TableDefinition
     /**
      * @param string                          $name        Table name.
      * @param array<string, ColumnDefinition> $columns     Column name => definition.
-     * @param string                          $primaryKey  Primary key column name.
+     * @param string|list<string>             $primaryKey  Primary key column(s). String for single, array for composite.
      * @param list<IndexDefinition>           $indexes     Index definitions.
      * @param list<ForeignKeyDefinition>      $foreignKeys Foreign key constraints.
      * @param string|null                     $comment     Optional table comment.
@@ -32,7 +32,7 @@ final readonly class TableDefinition
     public function __construct(
         public string $name,
         public array $columns,
-        public string $primaryKey = 'id',
+        public string|array $primaryKey = 'id',
         public array $indexes = [],
         public array $foreignKeys = [],
         public ?string $comment = null,

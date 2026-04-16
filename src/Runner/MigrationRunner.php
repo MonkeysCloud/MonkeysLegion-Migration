@@ -318,8 +318,10 @@ final class MigrationRunner
             );
         }
 
-        // Use transactional DDL on PostgreSQL (v2 ConnectionInterface::transaction)
-        if ($this->driver === 'pgsql') {
+        // Use transactional DDL where the dialect supports it.
+        // PostgreSQL and SQLite both support transactional DDL;
+        // MySQL/MariaDB do not (DDL causes implicit commit).
+        if (in_array($this->driver, ['pgsql', 'sqlite'], true)) {
             $this->db->transaction(function () use ($instance, $direction): void {
                 $instance->{$direction}($this->db);
             });

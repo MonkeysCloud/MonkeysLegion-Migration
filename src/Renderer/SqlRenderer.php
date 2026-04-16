@@ -72,9 +72,14 @@ final class SqlRenderer
                 $stmts[] = $this->renderCreateIndex($table->name, $idx);
             }
 
-            // FK constraints as separate ALTER TABLE (for cross-table deps)
-            foreach ($table->foreignKeys as $fk) {
-                $stmts[] = $this->renderAddForeignKey($table->name, $fk);
+            // FK constraints: inline for SQLite (no ALTER TABLE ADD CONSTRAINT),
+            // separate ALTER TABLE for MySQL/PostgreSQL
+            if ($this->dialect instanceof \MonkeysLegion\Migration\Dialect\SqliteDialect) {
+                // FKs already inlined in renderCreateTable() for SQLite
+            } else {
+                foreach ($table->foreignKeys as $fk) {
+                    $stmts[] = $this->renderAddForeignKey($table->name, $fk);
+                }
             }
         }
 
@@ -107,9 +112,14 @@ final class SqlRenderer
         // Reverse alters
         foreach (array_reverse($plan->alterTables) as $diff) {
             foreach (array_reverse($diff->addedColumns) as $col) {
-                $q  = $this->dialect->quoteIdentifier($diff->tableName);
-                $qc = $this->dialect->quoteIdentifier($col->effectiveName);
-                $stmts[] = "ALTER TABLE {$q} DROP COLUMN {$qc}";
+                // Guard: SQLite pre-3.35 doesn't support DROP COLUMN
+                if ($this->dialect instanceof \MonkeysLegion\Migration\Dialect\SqliteDialect) {
+                    $stmts[] = "-- TODO: Drop column {$diff->tableName}.{$col->effectiveName} (requires table rebuild on SQLite)";
+                } else {
+                    $q  = $this->dialect->quoteIdentifier($diff->tableName);
+                    $qc = $this->dialect->quoteIdentifier($col->effectiveName);
+                    $stmts[] = "ALTER TABLE {$q} DROP COLUMN {$qc}";
+                }
             }
 
             foreach (array_reverse($diff->droppedColumns) as $colName) {
@@ -152,8 +162,27 @@ final class SqlRenderer
             $defs[] = $this->renderColumnDef($col);
         }
 
-        // Primary key
-        $defs[] = "PRIMARY KEY ({$q($table->primaryKey)})";
+        // Primary key — single or composite
+        if (is_array($table->primaryKey)) {
+            $pkCols = implode(', ', array_map($q, $table->primaryKey));
+            $defs[] = "PRIMARY KEY ({$pkCols})";
+        } else {
+            $defs[] = "PRIMARY KEY ({$q($table->primaryKey)})";
+        }
+
+        // Inline FK constraints for SQLite (cannot use ALTER TABLE ADD CONSTRAINT)
+        if ($this->dialect instanceof \MonkeysLegion\Migration\Dialect\SqliteDialect) {
+            foreach ($table->foreignKeys as $fk) {
+                $defs[] = sprintf(
+                    'FOREIGN KEY (%s) REFERENCES %s (%s) ON DELETE %s ON UPDATE %s',
+                    $q($fk->column),
+                    $q($fk->referencedTable),
+                    $q($fk->referencedColumn),
+                    $fk->onDelete,
+                    $fk->onUpdate,
+                );
+            }
+        }
 
         $defsStr = implode(",\n  ", $defs);
         $suffix  = $this->dialect->engineSuffix();

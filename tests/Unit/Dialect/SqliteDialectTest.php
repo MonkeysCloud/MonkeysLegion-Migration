@@ -7,7 +7,6 @@ namespace MonkeysLegion\Migration\Tests\Unit\Dialect;
 use InvalidArgumentException;
 use MonkeysLegion\Migration\Dialect\SqliteDialect;
 use PHPUnit\Framework\Attributes\CoversClass;
-use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
 /**
