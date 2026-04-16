@@ -184,11 +184,24 @@ final class SchemaIntrospector
                 'nextval',
             );
 
+            // Detect primary key from DB metadata:
+            // MySQL: Key='PRI', SQLite: pk flag set in Extra, PG: resolved via detectPrimaryKey fallback
+            $isPk = match (true) {
+                // MySQL SHOW COLUMNS returns Key='PRI' for primary key columns
+                isset($meta['Key']) && strtoupper((string) $meta['Key']) === 'PRI' => true,
+                // SQLite PRAGMA table_info sets pk > 0 for PK columns (mapped to Extra)
+                isset($meta['pk']) && ((int) $meta['pk']) > 0 => true,
+                // Also detect from auto_increment (always PK)
+                $autoInc => true,
+                default => false,
+            };
+
             $columns[$name] = new ColumnDefinition(
                 name:          $name,
                 type:          $type,
                 nullable:      $nullable,
                 autoIncrement: $autoInc,
+                primaryKey:    $isPk,
                 default:       $meta['Default'] ?? $meta['column_default'] ?? null,
             );
         }
@@ -284,6 +297,7 @@ final class SchemaIntrospector
                 'Null'    => ((int) ($col['notnull'] ?? 0)) === 0 ? 'YES' : 'NO',
                 'Default' => $col['dflt_value'] ?? null,
                 'Extra'   => ((int) ($col['pk'] ?? 0)) === 1 ? 'auto_increment' : '',
+                'pk'      => (int) ($col['pk'] ?? 0),
             ];
         }
 

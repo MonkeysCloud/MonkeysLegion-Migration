@@ -262,7 +262,12 @@ final class SqlRenderer
 
         // Drop columns
         foreach ($diff->droppedColumns as $colName) {
-            $stmts[] = "ALTER TABLE {$q($diff->tableName)} DROP COLUMN {$q($colName)}";
+            // SQLite pre-3.35 doesn't support DROP COLUMN
+            if ($this->dialect instanceof \MonkeysLegion\Migration\Dialect\SqliteDialect) {
+                $stmts[] = "-- TODO: Drop column {$diff->tableName}.{$colName} (requires table rebuild on SQLite)";
+            } else {
+                $stmts[] = "ALTER TABLE {$q($diff->tableName)} DROP COLUMN {$q($colName)}";
+            }
         }
 
         // Add indexes
@@ -331,7 +336,7 @@ final class SqlRenderer
 
         // Enum/Set
         if ($typeLower === 'enum' || $typeLower === 'set') {
-            return " DEFAULT '" . addslashes((string) $value) . "'";
+            return " DEFAULT '" . $this->escapeSqlLiteral((string) $value) . "'";
         }
 
         // Determine if quotes are needed
@@ -342,9 +347,20 @@ final class SqlRenderer
         };
 
         $literal = $needsQuotes
-            ? "'" . addslashes((string) $value) . "'"
+            ? "'" . $this->escapeSqlLiteral((string) $value) . "'"
             : (string) $value;
 
         return " DEFAULT {$literal}";
+    }
+
+    /**
+     * Escape a string for use in a SQL literal using SQL-standard doubling.
+     *
+     * Replaces single quotes with '' (two single quotes) instead of
+     * backslash escaping, which is non-portable across dialects.
+     */
+    private function escapeSqlLiteral(string $value): string
+    {
+        return str_replace("'", "''", $value);
     }
 }
