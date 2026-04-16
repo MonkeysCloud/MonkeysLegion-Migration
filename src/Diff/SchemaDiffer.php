@@ -261,6 +261,13 @@ final class SchemaDiffer
         foreach ($desired->foreignKeys as $desiredFk) {
             if (!isset($currentFkCols[$desiredFk->column])) {
                 $diff->addedForeignKeys[] = $desiredFk;
+                continue;
+            }
+
+            $currentFk = $currentFkCols[$desiredFk->column];
+            if ($this->foreignKeysAreDifferent($desiredFk, $currentFk)) {
+                $diff->addedForeignKeys[] = $desiredFk;
+                $diff->droppedForeignKeys[] = $currentFk->name;
             }
         }
 
@@ -275,6 +282,17 @@ final class SchemaDiffer
                 $diff->droppedForeignKeys[] = $currentFk->name;
             }
         }
+    }
+
+    /**
+     * Compare FK definitions by target + actions (name can differ and still be equivalent).
+     */
+    private function foreignKeysAreDifferent(ForeignKeyDefinition $desired, ForeignKeyDefinition $current): bool
+    {
+        return $desired->referencedTable !== $current->referencedTable
+            || $desired->referencedColumn !== $current->referencedColumn
+            || strcasecmp($desired->onDelete, $current->onDelete) !== 0
+            || strcasecmp($desired->onUpdate, $current->onUpdate) !== 0;
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -307,19 +325,28 @@ final class SchemaDiffer
         // Build adjacency: table → [tables it depends on]
         /** @var array<string, list<string>> */
         $deps = [];
+        /** @var array<string, list<string>> reverse map: table -> dependents. */
+        $reverseDeps = [];
         $tableMap = [];
 
         foreach ($tables as $table) {
             $tableMap[$table->name] = $table;
             $deps[$table->name] = [];
+            $reverseDeps[$table->name] = [];
+        }
 
+        foreach ($tables as $table) {
             foreach ($table->foreignKeys as $fk) {
+                $dependency = $fk->referencedTable;
+
                 // Only add dependency if the referenced table is also being created
                 if (
-                    $fk->referencedTable !== $table->name
-                    && isset($allDesired[$fk->referencedTable])
+                    $dependency !== $table->name
+                    && isset($allDesired[$dependency])
+                    && isset($deps[$dependency])
                 ) {
-                    $deps[$table->name][] = $fk->referencedTable;
+                    $deps[$table->name][] = $dependency;
+                    $reverseDeps[$dependency][] = $table->name;
                 }
             }
         }
@@ -342,33 +369,28 @@ final class SchemaDiffer
             }
         }
 
-        while ($queue !== []) {
-            $name = array_shift($queue);
+        for ($queueIndex = 0; isset($queue[$queueIndex]); $queueIndex++) {
+            $name = $queue[$queueIndex];
             if (isset($tableMap[$name])) {
                 $sorted[] = $tableMap[$name];
             }
 
-            // For each other table, if it depends on $name, decrement its in-degree
-            foreach ($deps as $dependent => $dependencies) {
-                if (in_array($name, $dependencies, true)) {
-                    $inDegree[$dependent]--;
-                    if ($inDegree[$dependent] === 0) {
-                        $queue[] = $dependent;
-                    }
+            foreach ($reverseDeps[$name] as $dependent) {
+                $inDegree[$dependent]--;
+                if ($inDegree[$dependent] === 0) {
+                    $queue[] = $dependent;
                 }
             }
         }
 
         // Any remaining tables (circular deps) get appended
+        $sortedMap = [];
+        foreach ($sorted as $sortedTable) {
+            $sortedMap[$sortedTable->name] = true;
+        }
+
         foreach ($tables as $table) {
-            $found = false;
-            foreach ($sorted as $s) {
-                if ($s->name === $table->name) {
-                    $found = true;
-                    break;
-                }
-            }
-            if (!$found) {
+            if (!isset($sortedMap[$table->name])) {
                 $sorted[] = $table;
             }
         }
