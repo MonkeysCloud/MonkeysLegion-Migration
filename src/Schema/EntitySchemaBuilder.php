@@ -287,12 +287,12 @@ final class EntitySchemaBuilder
                     $columns = [
                         $jt->joinColumn => new ColumnDefinition(
                             name:     $jt->joinColumn,
-                            type:     $ownerPkType === 'uuid' ? 'uuid' : 'int',
+                            type:     $this->resolveFkType($ownerPkType),
                             nullable: false,
                         ),
                         $jt->inverseColumn => new ColumnDefinition(
                             name:     $jt->inverseColumn,
-                            type:     $targetPkType === 'uuid' ? 'uuid' : 'int',
+                            type:     $this->resolveFkType($targetPkType),
                             nullable: false,
                         ),
                     ];
@@ -614,7 +614,7 @@ final class EntitySchemaBuilder
 
         $columns[$fkCol] = new ColumnDefinition(
             name:     $fkCol,
-            type:     $targetType === 'uuid' ? 'uuid' : 'int',
+            type:     $this->resolveFkType($targetType),
             nullable: $m2o->nullable,
         );
 
@@ -657,7 +657,7 @@ final class EntitySchemaBuilder
 
         $columns[$fkCol] = new ColumnDefinition(
             name:     $fkCol,
-            type:     $targetType === 'uuid' ? 'uuid' : 'int',
+            type:     $this->resolveFkType($targetType),
             nullable: $o2o->nullable,
         );
 
@@ -756,5 +756,22 @@ final class EntitySchemaBuilder
         return strtolower(
             (string) preg_replace('/([a-z])([A-Z])/', '$1_$2', $base),
         );
+    }
+
+    /**
+     * Map a PK field type to the correct FK column type.
+     *
+     * Must preserve unsigned/signed distinction so MySQL doesn't reject
+     * FK constraints due to incompatible column types.
+     */
+    private function resolveFkType(string $pkType): string
+    {
+        return match ($pkType) {
+            'uuid'          => 'uuid',
+            'unsignedBigInt' => 'unsignedBigInt',
+            'bigInt'        => 'bigInt',
+            'unsignedInt'   => 'unsignedInt',
+            default         => $pkType,
+        };
     }
 }
