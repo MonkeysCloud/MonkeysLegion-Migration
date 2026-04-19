@@ -276,7 +276,7 @@ final class EntitySchemaBuilder
                         continue;
                     }
 
-                    $targetTable = $this->snake($meta->targetEntity);
+                    $targetTable = $this->resolveTargetTableName($meta->targetEntity);
 
                     $ownerPk  = $this->pkNameCache[$ownerTable] ?? 'id';
                     $targetPk = $this->pkNameCache[$targetTable] ?? 'id';
