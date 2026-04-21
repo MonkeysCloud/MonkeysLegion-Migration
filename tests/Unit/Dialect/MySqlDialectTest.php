@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace MonkeysLegion\Migration\Tests\Unit\Dialect;
 
 use MonkeysLegion\Migration\Dialect\MySqlDialect;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
-/**
- * @covers \MonkeysLegion\Migration\Dialect\MySqlDialect
- */
+#[CoversClass(MySqlDialect::class)]
 final class MySqlDialectTest extends TestCase
 {
     private MySqlDialect $dialect;
@@ -28,9 +28,7 @@ final class MySqlDialectTest extends TestCase
 
     // ─── Type mapping ──────────────────────────────────────────────
 
-    /**
-     * @dataProvider typeProvider
-     */
+    #[DataProvider('typeProvider')]
     public function testMapType(string $type, ?int $length, string $expected): void
     {
         $this->assertSame($expected, $this->dialect->mapType($type, $length));

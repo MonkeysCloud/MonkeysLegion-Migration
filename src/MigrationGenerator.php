@@ -6,44 +6,42 @@ namespace MonkeysLegion\Migration;
 
 use DateTimeImmutable;
 use MonkeysLegion\Database\Contracts\ConnectionInterface;
-use MonkeysLegion\Entity\Attributes\Column as ColumnAttr;
-use MonkeysLegion\Entity\Attributes\Entity;
-use MonkeysLegion\Entity\Attributes\Field as FieldAttr;
-use MonkeysLegion\Entity\Attributes\Id as IdAttr;
-use MonkeysLegion\Entity\Attributes\JoinTable;
+use MonkeysLegion\Database\Types\DatabaseDriver;
+use MonkeysLegion\Entity\Attributes\Column;
+use MonkeysLegion\Entity\Attributes\Field;
 use MonkeysLegion\Entity\Attributes\ManyToMany;
+use MonkeysLegion\Entity\Attributes\JoinTable;
 use MonkeysLegion\Entity\Attributes\ManyToOne;
 use MonkeysLegion\Entity\Attributes\OneToMany;
 use MonkeysLegion\Entity\Attributes\OneToOne;
+use MonkeysLegion\Entity\Metadata\MetadataRegistry;
 use MonkeysLegion\Migration\Dialect\MySqlDialect;
 use MonkeysLegion\Migration\Dialect\PostgreSqlDialect;
 use MonkeysLegion\Migration\Dialect\SqlDialect;
 use PDO;
-use ReflectionClass;
-use ReflectionProperty;
 
 final class MigrationGenerator
 {
     /** Tables that must never be dropped automatically. */
     private array $protectedTables = ['migrations', 'ml_migrations'];
 
-    /** Detected PDO driver name ('mysql' | 'pgsql'). */
-    private string $driver;
+    /** Detected database driver. */
+    private DatabaseDriver $driver;
 
     /** Dialect strategy resolved from the driver. */
     private SqlDialect $dialect;
 
-    public function __construct(private ConnectionInterface $db)
+    public function __construct(private readonly ConnectionInterface $db)
     {
-        $this->driver = $this->db->pdo()->getAttribute(PDO::ATTR_DRIVER_NAME);
+        $this->driver = $this->db->getDriver();
 
         $this->dialect = match ($this->driver) {
-            'pgsql' => new PostgreSqlDialect(),
-            'mysql' => new MySqlDialect(),
+            DatabaseDriver::PostgreSQL => new PostgreSqlDialect(),
+            DatabaseDriver::MySQL      => new MySqlDialect(),
             default => throw new \RuntimeException(
                 sprintf(
-                    "Unsupported PDO driver '%s'. Supported drivers: 'mysql', 'pgsql'.",
-                    $this->driver,
+                    "Unsupported driver '%s'. Supported drivers: 'mysql', 'pgsql'.",
+                    $this->driver->label(),
                 ),
             ),
         };
@@ -115,82 +113,49 @@ PHP;
         $primaryKeyNames = [];
         $entityTableMap  = [];
         foreach ($entities as $entityFqcn) {
-            $ref   = $entityFqcn instanceof ReflectionClass ? $entityFqcn : new ReflectionClass($entityFqcn);
-            $attributes = $ref->getAttributes(Entity::class);
-
-            if (!empty($attributes)) {
-                $entityAttr = $attributes[0]->newInstance();
-                $table = $entityAttr->table;
+            $entityMeta = MetadataRegistry::for(is_string($entityFqcn) ? $entityFqcn : $entityFqcn->getName());
+            $table = $entityMeta->table;
+            
+            $entityTableMap[$entityMeta->className] = $table;
+            $primaryKeyNames[$table]          = $entityMeta->primaryKey ?? 'id';
+            
+            if ($entityMeta->primaryKey && isset($entityMeta->fields[$entityMeta->primaryKey])) {
+                $primaryKeyTypes[$table] = $entityMeta->fields[$entityMeta->primaryKey]->type;
             } else {
-                $table = strtolower($ref->getShortName());
-            }
-            $entityTableMap[is_string($entityFqcn) ? $entityFqcn : $ref->getName()] = $table;
-
-            foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-                // Prefer #[Id] attribute for PK detection
-                if ($prop->getAttributes(IdAttr::class)) {
-                    $primaryKeyNames[$table] = $prop->getName();
-                    $fieldAttrs = $prop->getAttributes(FieldAttr::class);
-                    if ($fieldAttrs) {
-                        $fa = $fieldAttrs[0]->newInstance();
-                        $primaryKeyTypes[$table] = $fa->type ?? 'int';
-                    } else {
-                        $primaryKeyTypes[$table] = 'int';
-                    }
-                    break;
-                }
-                // Fallback: #[Field(primaryKey: true)]
-                $attrs = $prop->getAttributes(FieldAttr::class);
-                if ($attrs) {
-                    $attr = $attrs[0]->newInstance();
-                    if ($attr->primaryKey) {
-                        $primaryKeyNames[$table] = $prop->getName();
-                        $primaryKeyTypes[$table] = $attr->type ?? 'int';
-                        break;
-                    }
-                }
-            }
-            if (!isset($primaryKeyTypes[$table])) {
                 $primaryKeyTypes[$table] = 'int';
-            }
-            if (!isset($primaryKeyNames[$table])) {
-                $primaryKeyNames[$table] = 'id';
             }
         }
 
         foreach ($entities as $entityFqcn) {
-            $ref = $entityFqcn instanceof ReflectionClass
-                ? $entityFqcn
-                : new ReflectionClass($entityFqcn);
-
-            $attributes = $ref->getAttributes(Entity::class);
-
-            if (!empty($attributes)) {
-                $entityAttr = $attributes[0]->newInstance();
-                $table = $entityAttr->table;
-            } else {
-                $table = strtolower($ref->getShortName());
-            }
+            $entityMeta = MetadataRegistry::for(is_string($entityFqcn) ? $entityFqcn : $entityFqcn->getName());
+            $table = $entityMeta->table;
+            $ref   = new \ReflectionClass($entityMeta->className);
 
             $seenEntityTables[$table] = true;
 
             if (!isset($schema[$table])) {
-                $alterStmts[] = $this->createTableSql($ref, $table);
+                $alterStmts[] = $this->createTableSql($entityMeta);
                 // Mark table as seen; skip per-column diff — CREATE TABLE
                 // already includes every column.
                 $schema[$table] = ['__new__' => true];
                 $seenEntityTables[$table] = true;
 
                 // Still need to process ManyToMany join tables for this entity
-                foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+                foreach ($ref->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
                     foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
-                        $meta = $attr->newInstance();
-                        if ($meta->joinTable instanceof JoinTable) {
-                            $jt = $meta->joinTable;
+                        $m2m = $attr->newInstance();
+                        if ($m2m->joinTable instanceof JoinTable) {
+                            $jt = $m2m->joinTable;
                             $seenJoinTables[$jt->name] = true;
-                            $targetTable = $this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '');
-                            $ownerPk  = $primaryKeyNames[$table] ?? 'id';
-                            $targetPk = $primaryKeyNames[$targetTable] ?? 'id';
+                            
+                            $targetEntityClass = $m2m->targetEntity ?? $prop->getType()?->getName() ?? '';
+                            $targetMeta  = is_string($targetEntityClass) && class_exists($targetEntityClass)
+                                ? MetadataRegistry::for($targetEntityClass)
+                                : null;
+                            
+                            $targetTable = $targetMeta ? $targetMeta->table : $this->snake($targetEntityClass);
+                            $ownerPk     = $primaryKeyNames[$table] ?? 'id';
+                            $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
 
                             $joinTableStmts[$jt->name] =
                                 "CREATE TABLE IF NOT EXISTS {$q($jt->name)} (\n"
@@ -211,19 +176,24 @@ PHP;
             $pkName       = $primaryKeyNames[$table] ?? 'id';
             $expectedCols = [$pkName => true];
 
-            foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            foreach ($ref->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
                 $propName = $prop->getName();
 
                 // ManyToMany → remember expected join table
                 foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
-                    /** @var ManyToMany $meta */
-                    $meta = $attr->newInstance();
-                    if ($meta->joinTable instanceof JoinTable) {
-                        $jt = $meta->joinTable;
+                    $m2m = $attr->newInstance();
+                    if ($m2m->joinTable instanceof JoinTable) {
+                        $jt = $m2m->joinTable;
                         $seenJoinTables[$jt->name] = true;
-                        $targetTable = $this->snake($meta->targetEntity ?? $prop->getType()?->getName() ?? '');
-                        $ownerPk  = $primaryKeyNames[$table] ?? 'id';
-                        $targetPk = $primaryKeyNames[$targetTable] ?? 'id';
+
+                        $targetEntityClass = $m2m->targetEntity ?? $prop->getType()?->getName() ?? '';
+                        $targetMeta  = is_string($targetEntityClass) && class_exists($targetEntityClass)
+                            ? MetadataRegistry::for($targetEntityClass)
+                            : null;
+                        
+                        $targetTable = $targetMeta ? $targetMeta->table : $this->snake($targetEntityClass);
+                        $ownerPk     = $primaryKeyNames[$table] ?? 'id';
+                        $targetPk    = $primaryKeyNames[$targetTable] ?? 'id';
 
                         $joinTableStmts[$jt->name] =
                             "CREATE TABLE IF NOT EXISTS {$q($jt->name)} (\n"
@@ -357,20 +327,19 @@ PHP;
                     continue;
                 }
 
-                // Scalar #[Field]
-                foreach ($prop->getAttributes(FieldAttr::class) as $fa) {
-                    if (in_array($propName, $skipCols, true)) {
-                        continue 2;
+                // Scalar fields from Metadata
+                foreach ($entityMeta->fields as $propName => $field) {
+                    if ($propName === $pkName || in_array($propName, $skipCols, true)) {
+                        continue;
                     }
                     $expectedCols[$propName] = true;
 
-                    $field        = $fa->newInstance();
-                    $wantNullable = (bool) ($field->nullable ?? false);
-                    $enumValues   = $field->enumValues ?? null;
-                    $wantBase     = $this->dialect->mapType($field->type ?? 'string', $field->length ?? null, $enumValues);
-                    $wantDefault  = $field->default ?? null;
+                    $wantNullable = $field->nullable;
+                    $enumValues   = $field->enumValues;
+                    $wantBase     = $this->dialect->mapType($field->type, $field->length, $enumValues);
+                    $wantDefault  = $field->default;
                     $wantSql      = "{$wantBase} " . ($wantNullable ? 'NULL' : 'NOT NULL')
-                        . $this->renderDefault($wantDefault, $field->type ?? 'string');
+                        . $this->renderDefault($wantDefault, $field->type);
 
                     if (!in_array($propName, $existingCols, true)) {
                         /* ① brand-new column */
@@ -382,17 +351,15 @@ PHP;
                         $haveBase     = $this->dialect->mapType($colMeta['type'] ?? '', $colMeta['length'] ?? null);
                         $haveDefault  = $colMeta['default'] ?? null;
 
-                        // Normalize booleans for comparison:
-                        // '0' or 0 -> false/FALSE; '1' or 1 -> true/TRUE
+                        // Normalize booleans for comparison
                         $wantNorm = $wantDefault;
                         $haveNorm = $haveDefault;
 
-                        if (strtolower($field->type ?? 'string') === 'boolean' || strtolower($field->type ?? 'string') === 'bool') {
+                        if (strtolower($field->type) === 'boolean' || strtolower($field->type) === 'bool') {
                             if ($wantDefault !== null) {
                                 $wantNorm = $wantDefault ? 'TRUE' : 'FALSE';
                             }
                             if ($haveDefault !== null) {
-                                // DB might return '0'/'1', 0/1, or 'true'/'false'
                                 if ($haveDefault === '0' || $haveDefault === 0 || strcasecmp((string)$haveDefault, 'false') === 0) {
                                     $haveNorm = 'FALSE';
                                 } elseif ($haveDefault === '1' || $haveDefault === 1 || strcasecmp((string)$haveDefault, 'true') === 0) {
@@ -406,7 +373,7 @@ PHP;
                             || $wantBase     !== $haveBase
                             || $wantNorm     !== $haveNorm
                         ) {
-                            $defaultClause = $this->renderDefault($wantDefault, $field->type ?? 'string');
+                            $defaultClause = $this->renderDefault($wantDefault, $field->type);
                             $alterStmts[] = $this->dialect->alterColumnSql(
                                 $table,
                                 $propName,
@@ -419,14 +386,14 @@ PHP;
                 }
 
                 // #[Column] override
-                if ($prop->getAttributes(ColumnAttr::class)) {
+                if ($prop->getAttributes(Field::class)) {
                     if (in_array($propName, $skipCols, true)) {
                         continue;
                     }
                     $expectedCols[$propName] = true;
 
                     if (!in_array($propName, $existingCols, true)) {
-                        $attr    = $prop->getAttributes(ColumnAttr::class)[0]->newInstance();
+                        $attr    = $prop->getAttributes(Field::class)[0]->newInstance();
                         $sqlType = strtoupper($attr->type ?? 'VARCHAR');
                         $length  = $attr->length ? "({$attr->length})" : '';
                         $null    = $attr->nullable ? ' NULL' : ' NOT NULL';
@@ -447,7 +414,7 @@ PHP;
                             $alterStmts[] = $this->dialect->dropForeignKeySql($table, $fkName);
                         }
                     }
-                    $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
+                    $cascade = $this->driver === DatabaseDriver::PostgreSQL ? ' CASCADE' : '';
                     $alterStmts[] = "ALTER TABLE {$q($table)} DROP COLUMN {$q($col)}{$cascade}";
                 }
             }
@@ -465,7 +432,7 @@ PHP;
             $isJoinExpected   = isset($seenJoinTables[$tbl]);
 
             if (! $isEntityExpected && ! $isJoinExpected) {
-                $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
+                $cascade = $this->driver === DatabaseDriver::PostgreSQL ? ' CASCADE' : '';
                 $dropStmts[] = "DROP TABLE IF EXISTS {$q($tbl)}{$cascade}";
             }
         }
@@ -517,28 +484,14 @@ PHP;
     /**
      * Create a SQL CREATE TABLE statement for the given entity class.
      */
-    private function createTableSql(ReflectionClass $ref, string $table): string
+    private function createTableSql(\MonkeysLegion\Entity\Metadata\EntityMetadata $entityMeta): string
     {
         $q    = fn(string $id): string => $this->dialect->quoteIdentifier($id);
-        $cols = $this->getColumnDefinitions($ref);
+        $cols = $this->getColumnDefinitions($entityMeta);
         $defs = implode(",\n  ", $cols);
 
-        // Find primary key via #[Id] attribute, fallback to #[Field(primaryKey:true)]
-        $primaryKey = 'id'; // default fallback
-        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-            if ($prop->getAttributes(IdAttr::class)) {
-                $primaryKey = $prop->getName();
-                break;
-            }
-            $attrs = $prop->getAttributes(FieldAttr::class);
-            if ($attrs) {
-                $attr = $attrs[0]->newInstance();
-                if ($attr->primaryKey) {
-                    $primaryKey = $prop->getName();
-                    break;
-                }
-            }
-        }
+        $primaryKey = $entityMeta->primaryKey ?? 'id';
+        $table      = $entityMeta->table;
 
         $suffix = $this->dialect->engineSuffix();
         $suffix = $suffix ? "\n{$suffix}" : '';
@@ -554,166 +507,86 @@ SQL;
     /**
      * Extract scalar column definitions based on Field attributes.
      */
-    private function getColumnDefinitions(ReflectionClass $ref): array
+    private function getColumnDefinitions(\MonkeysLegion\Entity\Metadata\EntityMetadata $entityMeta): array
     {
         $q    = fn(string $id): string => $this->dialect->quoteIdentifier($id);
         $defs = [];
+        $ref  = new \ReflectionClass($entityMeta->className);
 
-        // First pass: detect primary key name and type
-        $primaryKeyType = 'int';
-        $primaryKeyName = 'id';
-        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
-            if ($prop->getAttributes(IdAttr::class)) {
-                $primaryKeyName = $prop->getName();
-                $fieldAttrs = $prop->getAttributes(FieldAttr::class);
-                if ($fieldAttrs) {
-                    $primaryKeyType = $fieldAttrs[0]->newInstance()->type ?? 'int';
-                }
-                break;
-            }
-            $attrs = $prop->getAttributes(FieldAttr::class);
-            if ($attrs) {
-                $attr = $attrs[0]->newInstance();
-                if ($attr->primaryKey) {
-                    $primaryKeyName = $prop->getName();
-                    $primaryKeyType = $attr->type ?? 'int';
-                    break;
-                }
-            }
-        }
+        $primaryKeyName = $entityMeta->primaryKey ?? 'id';
 
-        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+        foreach ($ref->getProperties(\ReflectionProperty::IS_PUBLIC) as $prop) {
             $name = $prop->getName();
 
-            // Skip pure inverse relations & Many-to-Many
-            if (
-                $prop->getAttributes(OneToMany::class)
-                || ($prop->getAttributes(OneToOne::class)
-                    && $prop->getAttributes(OneToOne::class)[0]->newInstance()->mappedBy)
-                || $prop->getAttributes(ManyToMany::class)
-            ) {
-                continue;
-            }
-
-            /* Many-to-One owning side → FK column with correct type */
+            // 1. Relationships (Owning side)
             if ($prop->getAttributes(ManyToOne::class)) {
                 $m2o      = $prop->getAttributes(ManyToOne::class)[0]->newInstance();
                 $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
 
-                // Skip if this FK column is the PK (shared PK/FK pattern);
-                // the PK will be emitted by the #[Field] handler below.
                 if ($colName === $primaryKeyName) {
                     continue;
                 }
 
-                $nullable = $m2o->nullable ? ' NULL' : ' NOT NULL';
-
-                $targetClass  = new ReflectionClass($m2o->targetEntity);
+                $targetMeta   = MetadataRegistry::for($m2o->targetEntity);
                 $targetPkType = 'int';
-                foreach ($targetClass->getProperties() as $targetProp) {
-                    if ($targetProp->getAttributes(IdAttr::class)) {
-                        $fa = $targetProp->getAttributes(FieldAttr::class);
-                        $targetPkType = $fa ? ($fa[0]->newInstance()->type ?? 'int') : 'int';
-                        break;
-                    }
-                    $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
-                    if ($targetAttrs) {
-                        $targetAttr = $targetAttrs[0]->newInstance();
-                        if ($targetAttr->primaryKey) {
-                            $targetPkType = $targetAttr->type ?? 'int';
-                            break;
-                        }
-                    }
+                if ($targetMeta->primaryKey && isset($targetMeta->fields[$targetMeta->primaryKey])) {
+                    $targetPkType = $targetMeta->fields[$targetMeta->primaryKey]->type;
                 }
 
-                $fkType = $targetPkType === 'uuid'
+                $nullable = $m2o->nullable ? ' NULL' : ' NOT NULL';
+                $fkType   = $targetPkType === 'uuid'
                     ? $this->dialect->uuidFkType()
                     : $this->dialect->intFkType();
+                
                 $defs[$colName] = "{$q($colName)} {$fkType}{$nullable}";
                 continue;
             }
 
-            /* One-to-One owning side → FK column with correct type */
             if ($prop->getAttributes(OneToOne::class)) {
                 $o2o = $prop->getAttributes(OneToOne::class)[0]->newInstance();
                 if (!$o2o->mappedBy) {
                     $colName  = str_ends_with($name, '_id') ? $name : $name . '_id';
 
-                    // Skip if this FK column is the PK (shared PK/FK pattern)
                     if ($colName === $primaryKeyName) {
                         continue;
                     }
 
-                    $nullable = $o2o->nullable ? ' NULL' : ' NOT NULL';
-
-                    $targetClass  = new ReflectionClass($o2o->targetEntity);
+                    $targetMeta   = MetadataRegistry::for($o2o->targetEntity);
                     $targetPkType = 'int';
-                    foreach ($targetClass->getProperties() as $targetProp) {
-                        if ($targetProp->getAttributes(IdAttr::class)) {
-                            $fa = $targetProp->getAttributes(FieldAttr::class);
-                            $targetPkType = $fa ? ($fa[0]->newInstance()->type ?? 'int') : 'int';
-                            break;
-                        }
-                        $targetAttrs = $targetProp->getAttributes(FieldAttr::class);
-                        if ($targetAttrs) {
-                            $targetAttr = $targetAttrs[0]->newInstance();
-                            if ($targetAttr->primaryKey) {
-                                $targetPkType = $targetAttr->type ?? 'int';
-                                break;
-                            }
-                        }
+                    if ($targetMeta->primaryKey && isset($targetMeta->fields[$targetMeta->primaryKey])) {
+                        $targetPkType = $targetMeta->fields[$targetMeta->primaryKey]->type;
                     }
 
-                    $fkType = $targetPkType === 'uuid'
+                    $nullable = $o2o->nullable ? ' NULL' : ' NOT NULL';
+                    $fkType   = $targetPkType === 'uuid'
                         ? $this->dialect->uuidFkType()
                         : $this->dialect->intFkType();
+                    
                     $defs[$colName] = "{$q($colName)} {$fkType}{$nullable}";
                     continue;
                 }
             }
+        }
 
-            /* Scalar field with #[Field] attribute */
-            $attrs = $prop->getAttributes(FieldAttr::class);
-            if ($attrs) {
-                $fa         = $attrs[0]->newInstance();
-                $type       = $fa->type ?? 'string';
-                $length     = $fa->length ?? null;
-                $nullable   = (bool)($fa->nullable ?? false);
-                $enumValues = $fa->enumValues ?? null;
-                $autoInc    = $fa->autoIncrement;
+        // 2. Scalar fields from Metadata
+        foreach ($entityMeta->fields as $name => $field) {
+            $type       = $field->type;
+            $length     = $field->length;
+            $nullable   = $field->nullable;
+            $enumValues = $field->enumValues;
+            $autoInc    = $field->autoIncrement;
 
-                if ($autoInc) {
-                    // For PG use SERIAL/BIGSERIAL; for MySQL keep type + AUTO_INCREMENT keyword
-                    $sqlBase       = $this->dialect->autoIncrementType($type);
-                    $nullSuffix    = $nullable ? ' NULL' : ' NOT NULL';
-                    $autoIncSuffix = $this->dialect->autoIncrementKeyword();
-                    $defs[$name]   = "{$q($name)} {$sqlBase}{$nullSuffix}{$autoIncSuffix}"
-                        . $this->renderDefault($fa->default ?? null, $type);
-                } else {
-                    $sqlType     = $this->dialect->mapTypeWithNullability($type, $length, $nullable, $enumValues);
-                    $defs[$name] = "{$q($name)} {$sqlType}"
-                        . $this->renderDefault($fa->default ?? null, $type);
-                }
-                continue;
+            if ($autoInc) {
+                $sqlBase       = $this->dialect->autoIncrementType($type);
+                $nullSuffix    = $nullable ? ' NULL' : ' NOT NULL';
+                $autoIncSuffix = $this->dialect->autoIncrementKeyword();
+                $defs[$name]   = "{$q($name)} {$sqlBase}{$nullSuffix}{$autoIncSuffix}"
+                    . $this->renderDefault($field->default, $type);
+            } else {
+                $sqlType     = $this->dialect->mapTypeWithNullability($type, $length, $nullable, $enumValues);
+                $defs[$name] = "{$q($name)} {$sqlType}"
+                    . $this->renderDefault($field->default, $type);
             }
-
-            /* #[Column] override */
-            $colAttrs = $prop->getAttributes(ColumnAttr::class);
-            if ($colAttrs) {
-                /** @var ColumnAttr $attr */
-                $attr     = $colAttrs[0]->newInstance();
-                $sqlType  = strtoupper($attr->type ?? 'VARCHAR');
-                $length   = $attr->length ? "({$attr->length})" : '';
-                $nullable = $attr->nullable ? ' NULL' : ' NOT NULL';
-                $defs[$name] = "{$q($name)} {$sqlType}{$length}{$nullable}"
-                    . $this->renderDefault($attr->default ?? null, $attr->type ?? 'string');
-                continue;
-            }
-
-            /* Fallback for properties without attributes */
-            $type    = $prop->getType()?->getName() ?? 'string';
-            $sqlType = $this->dialect->mapTypeWithNullability($type);
-            $defs[$name] = "{$q($name)} {$sqlType}";
         }
 
         return $defs;
@@ -733,7 +606,7 @@ SQL;
         $idPat = '[`"](\w+)[`"]';
 
         foreach ($lines as $line) {
-            $cascade = $this->driver === 'pgsql' ? ' CASCADE' : '';
+            $cascade = $this->driver === DatabaseDriver::PostgreSQL ? ' CASCADE' : '';
             if (preg_match('/^CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+' . $idPat . '/i', $line, $m)) {
                 $out[] = "DROP TABLE IF EXISTS {$q($m[1])}{$cascade};";
             } elseif (preg_match('/^ALTER\s+TABLE\s+' . $idPat . '\s+ADD\s+COLUMN\s+' . $idPat . '/i', $line, $m)) {
@@ -769,7 +642,7 @@ SQL;
     }
 
     /** Is this property a relation attribute? */
-    private function isRelation(ReflectionProperty $p): bool
+    private function isRelation(\ReflectionProperty $p): bool
     {
         return $p->getAttributes(OneToOne::class)
             || $p->getAttributes(OneToMany::class)

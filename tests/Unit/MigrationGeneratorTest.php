@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MonkeysLegion\Migration\Tests\Unit;
 
 use MonkeysLegion\Database\Contracts\ConnectionInterface;
+use MonkeysLegion\Database\Types\DatabaseDriver;
 use MonkeysLegion\Migration\MigrationGenerator;
 use MonkeysLegion\Migration\Tests\Fixtures\CommentEntity;
 use MonkeysLegion\Migration\Tests\Fixtures\FreelancerProfileEntity;
@@ -12,28 +13,35 @@ use MonkeysLegion\Migration\Tests\Fixtures\PostEntity;
 use MonkeysLegion\Migration\Tests\Fixtures\TagEntity;
 use MonkeysLegion\Migration\Tests\Fixtures\UserEntity;
 use PDO;
+use PHPUnit\Framework\Attributes\CoversClass;
 use PHPUnit\Framework\TestCase;
 
-/**
- * @covers \MonkeysLegion\Migration\MigrationGenerator
- */
+#[CoversClass(MigrationGenerator::class)]
 final class MigrationGeneratorTest extends TestCase
 {
     /**
      * Create a MigrationGenerator wired to an in-memory SQLite PDO pretending
      * to be the given driver.
      */
-    private function makeGenerator(string $driver): MigrationGenerator
+    private function makeGenerator(string $driverName): MigrationGenerator
     {
+        $driver = match ($driverName) {
+            'mysql' => DatabaseDriver::MySQL,
+            'pgsql' => DatabaseDriver::PostgreSQL,
+            'sqlite' => DatabaseDriver::SQLite,
+            default => throw new \InvalidArgumentException("Invalid driver name for test: $driverName"),
+        };
+
         $pdo = $this->createMock(PDO::class);
         $pdo->method('getAttribute')
             ->with(PDO::ATTR_DRIVER_NAME)
-            ->willReturn($driver);
+            ->willReturn($driverName);
         $pdo->method('quote')
             ->willReturnCallback(fn(string $v) => "'" . addslashes($v) . "'");
 
         $conn = $this->createMock(ConnectionInterface::class);
         $conn->method('pdo')->willReturn($pdo);
+        $conn->method('getDriver')->willReturn($driver);
 
         return new MigrationGenerator($conn);
     }
@@ -174,8 +182,8 @@ final class MigrationGeneratorTest extends TestCase
         ]);
 
         // Join table post_tags should reference both tables with their correct PK ("id")
-        $this->assertStringContainsString('REFERENCES "tagentity"("id")', $sql);
-        $this->assertStringContainsString('REFERENCES "post_entity"("id")', $sql);
+        $this->assertStringContainsString('REFERENCES "tag_entitys"("id")', $sql);
+        $this->assertStringContainsString('REFERENCES "post_entitys"("id")', $sql);
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -302,7 +310,7 @@ final class MigrationGeneratorTest extends TestCase
     public function testUnsupportedDriverThrowsException(): void
     {
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Unsupported PDO driver');
+        $this->expectExceptionMessage('Unsupported driver');
 
         $this->makeGenerator('sqlite');
     }
@@ -317,7 +325,7 @@ final class MigrationGeneratorTest extends TestCase
 
         // Simulate existing schema with only 'id' and 'name'
         $schema = [
-            'userentity' => [
+            'user_entitys' => [
                 'id'   => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name' => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
             ],
@@ -342,7 +350,7 @@ final class MigrationGeneratorTest extends TestCase
 
         // Schema has an extra column 'legacy_field' not in entity
         $schema = [
-            'userentity' => [
+            'user_entitys' => [
                 'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
                 'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
@@ -367,7 +375,7 @@ final class MigrationGeneratorTest extends TestCase
 
         // Schema has a table not in entities
         $schema = [
-            'userentity'   => [
+            'user_entitys'   => [
                 'id'   => ['Field' => 'id', 'type' => 'uuid'],
                 'name' => ['Field' => 'name', 'type' => 'string', 'length' => 100],
                 'email' => ['Field' => 'email', 'type' => 'string', 'length' => 255],
@@ -393,7 +401,7 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('pgsql');
 
         $schema = [
-            'userentity' => [
+            'user_entitys' => [
                 'id' => ['Field' => 'id', 'type' => 'uuid'],
                 'name' => ['Field' => 'name', 'type' => 'string', 'length' => 100],
                 'email' => ['Field' => 'email', 'type' => 'string', 'length' => 255],
@@ -419,7 +427,7 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('pgsql');
 
         $schema = [
-            'userentity' => [
+            'user_entitys' => [
                 'id'        => ['Field' => 'id', 'type' => 'uuid'],
                 'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
                 'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
@@ -441,7 +449,7 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('mysql');
 
         $schema = [
-            'userentity' => [
+            'user_entitys' => [
                 'id'        => ['Field' => 'id', 'type' => 'uuid'],
                 'name'      => ['Field' => 'name', 'type' => 'string', 'length' => 100],
                 'email'     => ['Field' => 'email', 'type' => 'string', 'length' => 255],
@@ -468,7 +476,7 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('pgsql');
 
         $schema = [
-            'userentity' => [
+            'user_entitys' => [
                 'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
                 'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],
@@ -488,7 +496,7 @@ final class MigrationGeneratorTest extends TestCase
         $gen = $this->makeGenerator('mysql');
 
         $schema = [
-            'userentity' => [
+            'user_entitys' => [
                 'id'           => ['Field' => 'id', 'type' => 'uuid', 'nullable' => false, 'default' => null],
                 'name'         => ['Field' => 'name', 'type' => 'string', 'length' => 100, 'nullable' => false, 'default' => null],
                 'email'        => ['Field' => 'email', 'type' => 'string', 'length' => 255, 'nullable' => false, 'default' => null],

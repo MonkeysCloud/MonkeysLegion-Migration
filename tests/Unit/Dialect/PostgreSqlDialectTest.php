@@ -5,11 +5,11 @@ declare(strict_types=1);
 namespace MonkeysLegion\Migration\Tests\Unit\Dialect;
 
 use MonkeysLegion\Migration\Dialect\PostgreSqlDialect;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
-/**
- * @covers \MonkeysLegion\Migration\Dialect\PostgreSqlDialect
- */
+#[CoversClass(PostgreSqlDialect::class)]
 final class PostgreSqlDialectTest extends TestCase
 {
     private PostgreSqlDialect $dialect;
@@ -28,9 +28,7 @@ final class PostgreSqlDialectTest extends TestCase
 
     // ─── Type mapping ──────────────────────────────────────────────
 
-    /**
-     * @dataProvider typeProvider
-     */
+    #[DataProvider('typeProvider')]
     public function testMapType(string $type, ?int $length, string $expected): void
     {
         $this->assertSame($expected, $this->dialect->mapType($type, $length));
