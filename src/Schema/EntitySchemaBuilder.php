@@ -112,10 +112,11 @@ final class EntitySchemaBuilder
         $this->processClassIndexes($ref, $table, $indexes);
 
         // Process property-level attributes
-        /** @var list<ReflectionProperty> $properties */
-        $properties = $ref->getProperties(ReflectionProperty::IS_PUBLIC);
+        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            if (!$prop instanceof ReflectionProperty) {
+                continue;
+            }
 
-        foreach ($properties as $prop) {
             $propName = $prop->getName();
 
             // Skip virtual/computed properties
@@ -131,23 +132,25 @@ final class EntitySchemaBuilder
             // ManyToOne owning side → FK column
             $m2oAttrs = $prop->getAttributes(ManyToOne::class);
             if ($m2oAttrs) {
-                $this->processManyToOne(
-                    $prop,
-                    /** @var ManyToOne */ $m2oAttrs[0]->newInstance(),
-                    $table,
-                    $primaryKey,
-                    $columns,
-                    $foreignKeys,
-                );
+                $m2o = $m2oAttrs[0]->newInstance();
+                if ($m2o instanceof ManyToOne) {
+                    $this->processManyToOne(
+                        $prop,
+                        $m2o,
+                        $table,
+                        $primaryKey,
+                        $columns,
+                        $foreignKeys,
+                    );
+                }
                 continue;
             }
 
             // OneToOne owning side → FK column
             $o2oAttrs = $prop->getAttributes(OneToOne::class);
             if ($o2oAttrs) {
-                /** @var OneToOne $o2o */
                 $o2o = $o2oAttrs[0]->newInstance();
-                if (!$o2o->mappedBy) {
+                if ($o2o instanceof OneToOne && !$o2o->mappedBy) {
                     $this->processOwningOneToOne(
                         $prop,
                         $o2o,
@@ -163,8 +166,10 @@ final class EntitySchemaBuilder
             // Scalar #[Field]
             $fieldAttrs = $prop->getAttributes(FieldAttr::class);
             if ($fieldAttrs) {
-                /** @var FieldAttr $field */
                 $field = $fieldAttrs[0]->newInstance();
+                if (!$field instanceof FieldAttr) {
+                    continue;
+                }
 
                 // Resolve effective column name
                 $colName = $this->resolveColumnName($prop);
@@ -211,13 +216,14 @@ final class EntitySchemaBuilder
             // #[Column] override without #[Field] (rare)
             $colAttrs = $prop->getAttributes(ColumnAttr::class);
             if ($colAttrs) {
-                /** @var ColumnAttr $attr */
                 $attr = $colAttrs[0]->newInstance();
-                $columns[$attr->name] = new ColumnDefinition(
-                    name:       $propName,
-                    type:       'string',
-                    columnName: $attr->name,
-                );
+                if ($attr instanceof ColumnAttr) {
+                    $columns[$attr->name] = new ColumnDefinition(
+                        name:       $propName,
+                        type:       'string',
+                        columnName: $attr->name,
+                    );
+                }
             }
         }
 
@@ -248,13 +254,16 @@ final class EntitySchemaBuilder
             $ref = $entity instanceof ReflectionClass ? $entity : new ReflectionClass($entity);
             $ownerTable = $this->resolveTableName($ref);
 
-            /** @var list<ReflectionProperty> $props */
-            $props = $ref->getProperties(ReflectionProperty::IS_PUBLIC);
+            foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+                if (!$prop instanceof ReflectionProperty) {
+                    continue;
+                }
 
-            foreach ($props as $prop) {
                 foreach ($prop->getAttributes(ManyToMany::class) as $attr) {
-                    /** @var ManyToMany $meta */
                     $meta = $attr->newInstance();
+                    if (!$meta instanceof ManyToMany) {
+                        continue;
+                    }
 
                     // v2: JoinTable can come from nested ManyToMany param
                     // or from a separate #[JoinTable] attribute on the property
@@ -262,7 +271,6 @@ final class EntitySchemaBuilder
                     if (!$jt instanceof JoinTable) {
                         $jtAttrs = $prop->getAttributes(JoinTable::class);
                         if ($jtAttrs) {
-                            /** @var JoinTable $jt */
                             $jt = $jtAttrs[0]->newInstance();
                         }
                     }
@@ -340,9 +348,8 @@ final class EntitySchemaBuilder
         $entityAttrs = $ref->getAttributes(EntityAttr::class);
 
         if ($entityAttrs) {
-            /** @var EntityAttr $entity */
             $entity = $entityAttrs[0]->newInstance();
-            if ($entity->table !== null) {
+            if ($entity instanceof EntityAttr && $entity->table !== null) {
                 return $entity->table;
             }
         }
@@ -360,18 +367,22 @@ final class EntitySchemaBuilder
      */
     private function collectPrimaryKeyInfo(ReflectionClass $ref, string $table): void
     {
-        /** @var list<ReflectionProperty> $properties */
-        $properties = $ref->getProperties(ReflectionProperty::IS_PUBLIC);
+        foreach ($ref->getProperties(ReflectionProperty::IS_PUBLIC) as $prop) {
+            if (!$prop instanceof ReflectionProperty) {
+                continue;
+            }
 
-        foreach ($properties as $prop) {
             // #[Id] attribute
             if ($prop->getAttributes(IdAttr::class)) {
                 $this->pkNameCache[$table] = $prop->getName();
 
                 $fieldAttrs = $prop->getAttributes(FieldAttr::class);
-                $this->pkTypeCache[$table] = $fieldAttrs
-                    ? (/** @var FieldAttr */ $fieldAttrs[0]->newInstance())->type ?? 'int'
-                    : 'int';
+                $pkField = $fieldAttrs ? $fieldAttrs[0]->newInstance() : null;
+                if ($pkField instanceof FieldAttr) {
+                    $this->pkTypeCache[$table] = $pkField->type ?? 'int';
+                } else {
+                    $this->pkTypeCache[$table] = 'int';
+                }
 
                 // Check if UUID
                 if ($prop->getAttributes(UuidAttr::class)) {
@@ -384,9 +395,8 @@ final class EntitySchemaBuilder
             // Fallback: #[Field(primaryKey: true)]
             $fieldAttrs = $prop->getAttributes(FieldAttr::class);
             if ($fieldAttrs) {
-                /** @var FieldAttr $field */
                 $field = $fieldAttrs[0]->newInstance();
-                if ($field->primaryKey) {
+                if ($field instanceof FieldAttr && $field->primaryKey) {
                     $this->pkNameCache[$table] = $prop->getName();
                     $this->pkTypeCache[$table] = $field->type ?? 'int';
                     return;
@@ -413,8 +423,10 @@ final class EntitySchemaBuilder
             return;
         }
 
-        /** @var Timestamps $ts */
         $ts = $attrs[0]->newInstance();
+        if (!$ts instanceof Timestamps) {
+            return;
+        }
 
         // Only add if not already defined as an explicit #[Field]
         if (!$this->hasFieldAttribute($ref, $ts->createdColumn)) {
@@ -450,8 +462,10 @@ final class EntitySchemaBuilder
             return;
         }
 
-        /** @var SoftDeletes $sd */
         $sd = $attrs[0]->newInstance();
+        if (!$sd instanceof SoftDeletes) {
+            return;
+        }
 
         if (!$this->hasFieldAttribute($ref, $sd->column)) {
             $columns[$sd->column] = new ColumnDefinition(
@@ -481,8 +495,10 @@ final class EntitySchemaBuilder
             return;
         }
 
-        /** @var AuditTrail $audit */
         $audit = $attrs[0]->newInstance();
+        if (!$audit instanceof AuditTrail) {
+            return;
+        }
 
         // created_by — nullable VARCHAR for user ID or name
         if (!$this->hasFieldAttribute($ref, $audit->createdByColumn)) {
@@ -539,8 +555,10 @@ final class EntitySchemaBuilder
         array &$indexes,
     ): void {
         foreach ($ref->getAttributes(IndexAttr::class) as $attr) {
-            /** @var IndexAttr $idx */
             $idx = $attr->newInstance();
+            if (!$idx instanceof IndexAttr) {
+                continue;
+            }
 
             $name = $idx->name ?? IndexDefinition::generateName(
                 $table,
@@ -568,8 +586,10 @@ final class EntitySchemaBuilder
         array &$indexes,
     ): void {
         foreach ($prop->getAttributes(IndexAttr::class) as $attr) {
-            /** @var IndexAttr $idx */
             $idx = $attr->newInstance();
+            if (!$idx instanceof IndexAttr) {
+                continue;
+            }
 
             $columns = $idx->columns ?: [$colName];
             $name    = $idx->name ?? IndexDefinition::generateName(
@@ -684,8 +704,11 @@ final class EntitySchemaBuilder
 
         // OneToOne with mappedBy is inverse
         $o2oAttrs = $prop->getAttributes(OneToOne::class);
-        if ($o2oAttrs && (/** @var OneToOne */ $o2oAttrs[0]->newInstance())->mappedBy) {
-            return true;
+        if ($o2oAttrs) {
+            $o2oCheck = $o2oAttrs[0]->newInstance();
+            if ($o2oCheck instanceof OneToOne && $o2oCheck->mappedBy) {
+                return true;
+            }
         }
 
         // ManyToMany — handled separately via buildJoinTables()
@@ -718,10 +741,10 @@ final class EntitySchemaBuilder
         $colAttrs = $prop->getAttributes(ColumnAttr::class);
 
         if ($colAttrs) {
-            /** @var ColumnAttr $col */
             $col = $colAttrs[0]->newInstance();
-
-            return $col->name;
+            if ($col instanceof ColumnAttr) {
+                return $col->name;
+            }
         }
 
         return $prop->getName();
