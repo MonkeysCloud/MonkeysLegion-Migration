@@ -41,12 +41,21 @@ final class SchemaDiffer
     /**
      * Compare desired schema with current schema.
      *
-     * @param array<string, TableDefinition> $desired Desired state (from entities).
-     * @param array<string, TableDefinition> $current Current state (from DB).
+     * By default, tables that exist in the database but have NO corresponding
+     * entity are left untouched ("unmanaged tables"). This prevents accidental
+     * destruction of manually-created tables like queue `jobs`, cache tables,
+     * or third-party plugin tables.
+     *
+     * Set $dropUnmanaged to true ONLY in explicit destructive commands
+     * (e.g. `schema:sync --drop`), never in a regular `schema:update`.
+     *
+     * @param array<string, TableDefinition> $desired        Desired state (from entities).
+     * @param array<string, TableDefinition> $current        Current state (from DB).
+     * @param bool                           $dropUnmanaged  If true, drop tables with no entity.
      *
      * @return DiffPlan Structured diff plan.
      */
-    public function diff(array $desired, array $current): DiffPlan
+    public function diff(array $desired, array $current, bool $dropUnmanaged = false): DiffPlan
     {
         $plan = new DiffPlan();
 
@@ -60,7 +69,7 @@ final class SchemaDiffer
         // Sort CREATE order by FK dependencies (tables referenced first)
         $plan->createTables = $this->sortByDependencies($plan->createTables, $desired);
 
-        // 2. Tables to ALTER (exist in both)
+        // 2. Tables to ALTER (exist in both — only compare entity-managed tables)
         foreach ($desired as $tableName => $desiredTable) {
             if (!isset($current[$tableName])) {
                 continue;
@@ -73,10 +82,14 @@ final class SchemaDiffer
             }
         }
 
-        // 3. Tables to DROP (exist in current but not in desired)
-        foreach ($current as $tableName => $currentTable) {
-            if (!isset($desired[$tableName]) && !$this->isProtected($tableName)) {
-                $plan->dropTables[] = $tableName;
+        // 3. Tables to DROP — only when explicitly requested.
+        //    By default, unmanaged tables (those without a corresponding entity)
+        //    are preserved to avoid destroying manually-created infrastructure.
+        if ($dropUnmanaged) {
+            foreach ($current as $tableName => $currentTable) {
+                if (!isset($desired[$tableName]) && !$this->isProtected($tableName)) {
+                    $plan->dropTables[] = $tableName;
+                }
             }
         }
 

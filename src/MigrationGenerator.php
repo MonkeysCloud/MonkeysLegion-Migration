@@ -93,11 +93,13 @@ final class MigrationGenerator
      * @param list<class-string|ReflectionClass<object>> $entities Entity FQCNs.
      * @param array<string, mixed>                        $schema   Current DB schema.
      *
+     * @param bool                                       $dropUnmanaged  Drop tables with no entity.
+     *
      * @return string SQL statements to apply.
      */
-    public function diff(array $entities, array $schema): string
+    public function diff(array $entities, array $schema, bool $dropUnmanaged = false): string
     {
-        $plan = $this->computeDiff($entities, $schema);
+        $plan = $this->computeDiff($entities, $schema, $dropUnmanaged);
 
         if ($plan->isEmpty()) {
             return '';
@@ -110,9 +112,10 @@ final class MigrationGenerator
      * Compute a structured DiffPlan (v2 API).
      *
      * @param list<class-string|ReflectionClass<object>> $entities
-     * @param array<string, mixed>|null                   $schema  Current DB schema (null = introspect).
+     * @param array<string, mixed>|null                   $schema         Current DB schema (null = introspect).
+     * @param bool                                        $dropUnmanaged  Drop tables with no entity.
      */
-    public function computeDiff(array $entities, ?array $schema = null): DiffPlan
+    public function computeDiff(array $entities, ?array $schema = null, bool $dropUnmanaged = false): DiffPlan
     {
         // Build desired state from entities
         $desiredTables = $this->entityBuilder->buildAll($entities);
@@ -127,7 +130,7 @@ final class MigrationGenerator
             $current = $this->normalizeSchema($schema);
         }
 
-        return $this->differ->diff($desired, $current);
+        return $this->differ->diff($desired, $current, $dropUnmanaged);
     }
 
     /**

@@ -371,7 +371,7 @@ final class MigrationGeneratorTest extends TestCase
             ],
         ];
 
-        $sql = $gen->diff([UserEntity::class], $schema);
+        $sql = $gen->diff([UserEntity::class], $schema, dropUnmanaged: true);
 
         $this->assertStringContainsString('DROP TABLE IF EXISTS "obsolete_table"', $sql);
     }
@@ -423,7 +423,7 @@ final class MigrationGeneratorTest extends TestCase
             ],
         ];
 
-        $sql = $gen->diff([UserEntity::class], $schema);
+        $sql = $gen->diff([UserEntity::class], $schema, dropUnmanaged: true);
 
         $this->assertStringContainsString('DROP TABLE IF EXISTS "jobs"', $sql);
     }
@@ -445,7 +445,7 @@ final class MigrationGeneratorTest extends TestCase
             ],
         ];
 
-        $sql = $gen->diff([UserEntity::class], $schema);
+        $sql = $gen->diff([UserEntity::class], $schema, dropUnmanaged: true);
 
         $this->assertStringContainsString('DROP TABLE IF EXISTS `jobs`', $sql);
     }
@@ -509,7 +509,7 @@ final class MigrationGeneratorTest extends TestCase
             ],
         ];
 
-        $sql = $gen->diff([UserEntity::class], $schema);
+        $sql = $gen->diff([UserEntity::class], $schema, dropUnmanaged: true);
 
         $createPos = strpos($sql, 'CREATE TABLE');
         $dropPos   = strpos($sql, 'DROP TABLE');

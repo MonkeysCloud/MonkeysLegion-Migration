@@ -53,7 +53,26 @@ final class SchemaDifferTest extends TestCase
 
     // ── Table dropping ─────────────────────────────────────────────
 
-    public function testOrphanTableAppearsInDropTables(): void
+    public function testUnmanagedTablesArePreservedByDefault(): void
+    {
+        $current = [
+            'jobs' => new TableDefinition(
+                name: 'jobs',
+                columns: ['id' => new ColumnDefinition(name: 'id', type: 'int')],
+            ),
+            'cache' => new TableDefinition(
+                name: 'cache',
+                columns: ['id' => new ColumnDefinition(name: 'id', type: 'int')],
+            ),
+        ];
+
+        // Default behavior: unmanaged tables are NOT dropped
+        $plan = $this->differ->diff([], $current);
+
+        $this->assertEmpty($plan->dropTables, 'Unmanaged tables should NOT be dropped by default');
+    }
+
+    public function testOrphanTableDroppedWhenExplicitlyRequested(): void
     {
         $current = [
             'obsolete' => new TableDefinition(
@@ -62,7 +81,8 @@ final class SchemaDifferTest extends TestCase
             ),
         ];
 
-        $plan = $this->differ->diff([], $current);
+        // Only drops when $dropUnmanaged = true
+        $plan = $this->differ->diff([], $current, dropUnmanaged: true);
 
         $this->assertContains('obsolete', $plan->dropTables);
     }
@@ -80,7 +100,8 @@ final class SchemaDifferTest extends TestCase
             ),
         ];
 
-        $plan = $this->differ->diff([], $current);
+        // Even with dropUnmanaged=true, protected tables are never dropped
+        $plan = $this->differ->diff([], $current, dropUnmanaged: true);
 
         $this->assertNotContains('migrations', $plan->dropTables);
         $this->assertNotContains('ml_migrations', $plan->dropTables);
@@ -97,7 +118,8 @@ final class SchemaDifferTest extends TestCase
             ),
         ];
 
-        $plan = $this->differ->diff([], $current);
+        // Even with dropUnmanaged=true, custom-protected tables survive
+        $plan = $this->differ->diff([], $current, dropUnmanaged: true);
 
         $this->assertNotContains('sessions', $plan->dropTables);
     }

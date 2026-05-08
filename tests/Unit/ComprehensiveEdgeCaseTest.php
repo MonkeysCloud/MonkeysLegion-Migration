@@ -240,7 +240,7 @@ final class ComprehensiveEdgeCaseTest extends TestCase
             ],
         ];
 
-        $sql = $gen->diff([PostEntity::class], $schema);
+        $sql = $gen->diff([PostEntity::class], $schema, dropUnmanaged: true);
 
         $this->assertStringContainsString("ALTER TABLE `postentity` DROP FOREIGN KEY `fk_post_author`", $sql);
         $this->assertStringContainsString("ALTER TABLE `postentity` DROP COLUMN `author_id`", $sql);
@@ -262,7 +262,7 @@ final class ComprehensiveEdgeCaseTest extends TestCase
             'postentity' => [],
         ];
 
-        $sql = $gen->diff([PostEntity::class], $schema);
+        $sql = $gen->diff([PostEntity::class], $schema, dropUnmanaged: true);
 
         $this->assertStringContainsString('DROP TABLE IF EXISTS `old_join_table`', $sql);
     }
