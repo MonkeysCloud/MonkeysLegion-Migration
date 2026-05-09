@@ -305,6 +305,18 @@ final class EntitySchemaBuilder
                         ),
                     ];
 
+                    // Extra pivot columns (e.g. role, sort_order)
+                    foreach ($jt->extraColumns as $colName => $colDef) {
+                        $columns[$colName] = new ColumnDefinition(
+                            name:       $colName,
+                            type:       $colDef['type'] ?? 'string',
+                            length:     $colDef['length'] ?? null,
+                            nullable:   $colDef['nullable'] ?? false,
+                            default:    $colDef['default'] ?? null,
+                            enumValues: $colDef['enumValues'] ?? null,
+                        );
+                    }
+
                     $foreignKeys = [
                         new ForeignKeyDefinition(
                             name:             ForeignKeyDefinition::generateName($jt->name, $jt->joinColumn),
