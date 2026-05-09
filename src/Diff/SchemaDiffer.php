@@ -211,6 +211,11 @@ final class SchemaDiffer
             }
         }
 
+        // Auto-increment (e.g. entity declares autoIncrement: true but DB column lacks it)
+        if ($desired->autoIncrement !== $current->autoIncrement) {
+            return true;
+        }
+
         return false;
     }
 
