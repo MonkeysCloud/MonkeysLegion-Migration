@@ -303,11 +303,39 @@ PHP;
                     ? $nullableRaw
                     : in_array(strtoupper((string) $nullableRaw), ['YES', 'TRUE', '1'], true);
 
+                // Length / precision
+                $length = $colMeta['length'] ?? $colMeta['Length'] ?? null;
+
+                // Enum values — parse from length string if type is 'enum'
+                $enumValues = null;
+                if ($type === 'enum' && $length !== null && is_string($length)) {
+                    // "'draft','published'" → ['draft','published']
+                    $enumValues = array_map(
+                        static fn(string $v): string => trim($v, " '\""),
+                        explode(',', $length),
+                    );
+                    $length = null; // enum doesn't use numeric length
+                }
+
+                // Default value
+                $default = array_key_exists('default', $colMeta)
+                    ? $colMeta['default']
+                    : ($colMeta['Default'] ?? $colMeta['column_default'] ?? null);
+
+                // Auto-increment
+                $autoInc = (bool) ($colMeta['autoIncrement'] ?? $colMeta['auto_increment'] ?? false);
+                if (!$autoInc && isset($colMeta['Extra'])) {
+                    $autoInc = str_contains(strtolower((string) $colMeta['Extra']), 'auto_increment');
+                }
+
                 $columns[$colName] = new \MonkeysLegion\Migration\Schema\ColumnDefinition(
-                    name:     $colName,
-                    type:     $type,
-                    nullable: $nullable,
-                    default:  $colMeta['Default'] ?? $colMeta['column_default'] ?? null,
+                    name:          $colName,
+                    type:          $type,
+                    length:        $length,
+                    nullable:      $nullable,
+                    autoIncrement: $autoInc,
+                    default:       $default,
+                    enumValues:    $enumValues,
                 );
             }
 
