@@ -150,6 +150,7 @@ final class SqliteDialect implements SqlDialect
         string $baseType,
         bool   $nullable,
         string $defaultClause,
+        bool   $autoIncrement = false,
     ): string {
         // SQLite does not support ALTER COLUMN — requires table rebuild
         $null = $nullable ? ' NULL' : ' NOT NULL';

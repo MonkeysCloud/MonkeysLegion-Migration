@@ -175,10 +175,14 @@ SQL;
         string $baseType,
         bool   $nullable,
         string $defaultClause,
+        bool   $autoIncrement = false,
     ): string {
         $parts   = [];
         $qColumn = $this->quoteIdentifier($column);
-        $parts[] = "ALTER COLUMN {$qColumn} TYPE {$baseType}";
+
+        // PG: auto-increment is handled via sequences, not a keyword
+        $effectiveType = $autoIncrement ? $this->autoIncrementType($baseType) : $baseType;
+        $parts[] = "ALTER COLUMN {$qColumn} TYPE {$effectiveType}";
         $parts[] = $nullable
             ? "ALTER COLUMN {$qColumn} DROP NOT NULL"
             : "ALTER COLUMN {$qColumn} SET NOT NULL";

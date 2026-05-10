@@ -106,6 +106,7 @@ interface SqlDialect
         string $baseType,
         bool   $nullable,
         string $defaultClause,
+        bool   $autoIncrement = false,
     ): string;
 
     /**

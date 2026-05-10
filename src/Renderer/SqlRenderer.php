@@ -257,6 +257,7 @@ final class SqlRenderer
                 $baseType,
                 $to->nullable,
                 $defaultClause,
+                $to->autoIncrement,
             );
         }
 

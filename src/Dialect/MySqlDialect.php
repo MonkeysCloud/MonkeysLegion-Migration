@@ -162,15 +162,18 @@ SQL;
         string $baseType,
         bool   $nullable,
         string $defaultClause,
+        bool   $autoIncrement = false,
     ): string {
         $null = $nullable ? ' NULL' : ' NOT NULL';
+        $auto = $autoIncrement ? ' AUTO_INCREMENT' : '';
 
         return sprintf(
-            'ALTER TABLE %s MODIFY COLUMN %s %s%s%s',
+            'ALTER TABLE %s MODIFY COLUMN %s %s%s%s%s',
             $this->quoteIdentifier($table),
             $this->quoteIdentifier($column),
             $baseType,
             $null,
+            $auto,
             $defaultClause,
         );
     }
