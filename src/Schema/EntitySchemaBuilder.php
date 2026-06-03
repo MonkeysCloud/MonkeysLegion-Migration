@@ -306,7 +306,8 @@ final class EntitySchemaBuilder
                     ];
 
                     // Extra pivot columns (e.g. role, sort_order)
-                    foreach ($jt->extraColumns as $colName => $colDef) {
+                    $extraColumns = property_exists($jt, 'extraColumns') ? ($jt->extraColumns ?? []) : [];
+                    foreach ($extraColumns as $colName => $colDef) {
                         $columns[$colName] = new ColumnDefinition(
                             name:       $colName,
                             type:       $colDef['type'] ?? 'string',

@@ -34,7 +34,7 @@ final class SqlRendererTest extends TestCase
 
         $sql = $renderer->render($plan);
 
-        self::assertStringContainsString('CREATE TABLE', $sql);
+        self::assertStringContainsString('CREATE TABLE IF NOT EXISTS', $sql);
         self::assertStringContainsString('users', $sql);
         self::assertStringContainsString('id', $sql);
         self::assertStringContainsString('name', $sql);

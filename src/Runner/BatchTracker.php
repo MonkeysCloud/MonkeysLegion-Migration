@@ -153,6 +153,8 @@ final class BatchTracker
      */
     public function getLastStepsMigrations(int $steps): array
     {
+        $this->ensureTable();
+
         $pdo  = $this->db->pdo();
         $stmt = $pdo->query(
             'SELECT migration FROM ' . self::TABLE
@@ -167,6 +169,8 @@ final class BatchTracker
      */
     public function recordMigration(string $name, int $batch): void
     {
+        $this->ensureTable();
+
         $pdo  = $this->db->pdo();
         $stmt = $pdo->prepare(
             'INSERT INTO ' . self::TABLE . ' (migration, batch, executed_at) VALUES (:m, :b, :e)',
@@ -183,6 +187,8 @@ final class BatchTracker
      */
     public function removeMigration(string $name): void
     {
+        $this->ensureTable();
+
         $pdo  = $this->db->pdo();
         $stmt = $pdo->prepare(
             'DELETE FROM ' . self::TABLE . ' WHERE migration = :m',
@@ -195,6 +201,8 @@ final class BatchTracker
      */
     public function reset(): void
     {
+        $this->ensureTable();
+
         $pdo = $this->db->pdo();
         $pdo->exec('DELETE FROM ' . self::TABLE);
     }

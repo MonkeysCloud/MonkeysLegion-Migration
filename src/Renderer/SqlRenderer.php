@@ -188,7 +188,7 @@ final class SqlRenderer
         $suffix  = $this->dialect->engineSuffix();
         $suffix  = $suffix !== '' ? "\n{$suffix}" : '';
 
-        return "CREATE TABLE {$q($table->name)} (\n  {$defsStr}\n){$suffix}";
+        return "CREATE TABLE IF NOT EXISTS {$q($table->name)} (\n  {$defsStr}\n){$suffix}";
     }
 
     /**

@@ -186,7 +186,7 @@ final class ComprehensiveEdgeCaseTest extends TestCase
         $gen = $this->makeGenerator('mysql');
 
         $sql = $gen->diff([CustomTableEntity::class], []);
-        $this->assertStringContainsString('CREATE TABLE `custom_table`', $sql);
+        $this->assertStringContainsString('CREATE TABLE IF NOT EXISTS `custom_table`', $sql);
     }
 
     /**

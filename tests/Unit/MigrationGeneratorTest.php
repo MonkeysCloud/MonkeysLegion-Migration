@@ -276,8 +276,8 @@ final class MigrationGeneratorTest extends TestCase
             TagEntity::class,
         ]);
 
-        // v2: CREATE TABLE (not IF NOT EXISTS — handled by v2 renderer)
-        $this->assertStringContainsString('CREATE TABLE "post_tags"', $sql);
+        // v2: CREATE TABLE IF NOT EXISTS
+        $this->assertStringContainsString('CREATE TABLE IF NOT EXISTS "post_tags"', $sql);
         $this->assertStringContainsString('"tag_id"', $sql);
         $this->assertStringContainsString('"post_id"', $sql);
     }
