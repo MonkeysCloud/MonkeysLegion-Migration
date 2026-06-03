@@ -20,7 +20,7 @@ use PDO;
  */
 final class BatchTracker
 {
-    private const string TABLE = 'ml_migrations';
+    public const string TABLE = 'ml_migrations';
 
     private readonly string $driver;
 
@@ -122,6 +122,25 @@ final class BatchTracker
     }
 
     /**
+     * Get migrations from a specific batch.
+     *
+     * @return list<string> Migration names in reverse order.
+     */
+    public function getBatchMigrations(int $batch): array
+    {
+        $this->ensureTable();
+
+        $pdo  = $this->db->pdo();
+        $stmt = $pdo->prepare(
+            'SELECT migration FROM ' . self::TABLE
+            . ' WHERE batch = :batch ORDER BY id DESC',
+        );
+        $stmt->execute(['batch' => $batch]);
+
+        return $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+    }
+
+    /**
      * Get migrations from the last batch.
      *
      * @return list<string> Migration names in reverse order.
@@ -134,14 +153,7 @@ final class BatchTracker
             return [];
         }
 
-        $pdo  = $this->db->pdo();
-        $stmt = $pdo->prepare(
-            'SELECT migration FROM ' . self::TABLE
-            . ' WHERE batch = :batch ORDER BY id DESC',
-        );
-        $stmt->execute(['batch' => $lastBatch]);
-
-        return $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+        return $this->getBatchMigrations($lastBatch);
     }
 
     /**

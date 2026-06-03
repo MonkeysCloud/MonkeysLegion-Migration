@@ -144,6 +144,23 @@ final class PostgreSqlDialectTest extends TestCase
         $this->assertStringNotContainsString('SET DEFAULT', $sql);
     }
 
+    public function testAlterColumnSqlDoesNotUseSerialEvenIfAutoIncrementTrue(): void
+    {
+        // When altering a column, we should use base type (INTEGER), not SERIAL.
+        // SERIAL is a macro for CREATE TABLE.
+        $sql = $this->dialect->alterColumnSql(
+            'notifications',
+            'id',
+            'INTEGER',
+            false,
+            '',
+            true // autoIncrement
+        );
+
+        $this->assertStringContainsString('ALTER COLUMN "id" TYPE INTEGER', $sql);
+        $this->assertStringNotContainsString('SERIAL', $sql);
+    }
+
     // ─── FK check toggling returns empty (PG DDL is transactional) ─
 
     public function testDisableFkChecksReturnsEmpty(): void

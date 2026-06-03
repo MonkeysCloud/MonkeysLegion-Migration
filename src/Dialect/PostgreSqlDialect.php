@@ -181,8 +181,10 @@ SQL;
         $qColumn = $this->quoteIdentifier($column);
 
         // PG: auto-increment is handled via sequences, not a keyword
-        $effectiveType = $autoIncrement ? $this->autoIncrementType($baseType) : $baseType;
-        $parts[] = "ALTER COLUMN {$qColumn} TYPE {$effectiveType}";
+        // NOTE: In ALTER TABLE ... ALTER COLUMN ... TYPE, we must NOT use SERIAL.
+        // SERIAL is a macro for creating a sequence and setting a default.
+        // For existing columns, we use the base type.
+        $parts[] = "ALTER COLUMN {$qColumn} TYPE {$baseType}";
         $parts[] = $nullable
             ? "ALTER COLUMN {$qColumn} DROP NOT NULL"
             : "ALTER COLUMN {$qColumn} SET NOT NULL";

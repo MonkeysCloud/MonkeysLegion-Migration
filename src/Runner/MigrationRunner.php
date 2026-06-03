@@ -95,15 +95,8 @@ final class MigrationRunner
     {
         $start = microtime(true);
 
-        $this->tracker->ensureTable();
-
         if ($batch !== null) {
-            $pdo  = $this->db->pdo();
-            $stmt = $pdo->prepare(
-                'SELECT migration FROM ml_migrations WHERE batch = :b ORDER BY id DESC',
-            );
-            $stmt->execute(['b' => $batch]);
-            $migrations = $stmt->fetchAll(PDO::FETCH_COLUMN) ?: [];
+            $migrations = $this->tracker->getBatchMigrations($batch);
         } elseif ($steps !== null) {
             $migrations = $this->tracker->getLastStepsMigrations($steps);
         } else {
