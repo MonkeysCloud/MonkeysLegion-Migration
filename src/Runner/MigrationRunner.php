@@ -1,4 +1,5 @@
 <?php
+
 declare(strict_types=1);
 
 namespace MonkeysLegion\Migration\Runner;
@@ -70,16 +71,16 @@ final class MigrationRunner
                 $failed[] = $file;
 
                 return new RunResult(
-                    executed:   $executed,
-                    failed:     $failed,
+                    executed: $executed,
+                    failed: $failed,
                     durationMs: $this->elapsed($start),
-                    error:      "{$file}: {$e->getMessage()}",
+                    error: "{$file}: {$e->getMessage()}",
                 );
             }
         }
 
         return new RunResult(
-            executed:   $executed,
+            executed: $executed,
             durationMs: $this->elapsed($start),
         );
     }
@@ -128,16 +129,16 @@ final class MigrationRunner
                 $failed[] = $file;
 
                 return new RunResult(
-                    executed:   $executed,
-                    failed:     $failed,
+                    executed: $executed,
+                    failed: $failed,
                     durationMs: $this->elapsed($start),
-                    error:      "{$file}: {$e->getMessage()}",
+                    error: "{$file}: {$e->getMessage()}",
                 );
             }
         }
 
         return new RunResult(
-            executed:   $executed,
+            executed: $executed,
             durationMs: $this->elapsed($start),
         );
     }
@@ -165,16 +166,16 @@ final class MigrationRunner
                 $failed[] = $file;
 
                 return new RunResult(
-                    executed:   $executed,
-                    failed:     $failed,
+                    executed: $executed,
+                    failed: $failed,
                     durationMs: $this->elapsed($start),
-                    error:      "{$file}: {$e->getMessage()}",
+                    error: "{$file}: {$e->getMessage()}",
                 );
             }
         }
 
         return new RunResult(
-            executed:   $executed,
+            executed: $executed,
             durationMs: $this->elapsed($start),
         );
     }
@@ -205,10 +206,10 @@ final class MigrationRunner
         $runResult = $this->run($migrationsDir);
 
         return new RunResult(
-            executed:   $runResult->executed,
-            failed:     $runResult->failed,
+            executed: $runResult->executed,
+            failed: $runResult->failed,
             durationMs: $this->elapsed($start),
-            error:      $runResult->error,
+            error: $runResult->error,
         );
     }
 
@@ -296,31 +297,22 @@ final class MigrationRunner
             throw new RuntimeException("Migration file not found: {$path}");
         }
 
-        require_once $path;
+        // Capture the return value of the file
+        $instance = require_once $path;
 
-        // Extract class name from filename (convention: M20260101_Name.php → M20260101_Name)
-        $class = 'App\\Migration\\' . pathinfo($file, PATHINFO_FILENAME);
-
-        if (!class_exists($class)) {
-            // Try without namespace
-            $class = pathinfo($file, PATHINFO_FILENAME);
+        // Check if it is an object (the anonymous class instance)
+        if (!is_object($instance)) {
+            throw new RuntimeException("Migration file {$file} must return an object.");
         }
 
-        if (!class_exists($class)) {
-            throw new RuntimeException("Migration class not found in {$file}");
-        }
-
-        $instance = new $class();
-
+        // Verify the method exists on the returned object
         if (!method_exists($instance, $direction)) {
             throw new RuntimeException(
-                "Migration {$class} does not have a {$direction}() method.",
+                "Migration in {$file} does not have a {$direction}() method.",
             );
         }
 
-        // Use transactional DDL where the dialect supports it.
-        // PostgreSQL and SQLite both support transactional DDL;
-        // MySQL/MariaDB do not (DDL causes implicit commit).
+        // Execute within transaction if needed
         if (in_array($this->driver, ['pgsql', 'sqlite'], true)) {
             $this->db->transaction(function () use ($instance, $direction): void {
                 $instance->{$direction}($this->db);
