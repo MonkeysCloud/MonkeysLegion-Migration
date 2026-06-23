@@ -98,4 +98,38 @@ final class DiffPlan
 
         return $count;
     }
+
+    /**
+     * Remove all changes related to one or more tables.
+     *
+     * Useful for skipping partitioned tables or tables that cannot
+     * be altered by the automatic diff (e.g. Postgres partition keys).
+     *
+     * @param list<string> $tableNames Table names to exclude from the plan.
+     */
+    public function removeTables(array $tableNames): void
+    {
+        $set = array_flip($tableNames);
+
+        $this->createTables = array_values(
+            array_filter(
+                $this->createTables,
+                static fn($t) => !isset($set[$t->name]),
+            ),
+        );
+
+        $this->alterTables = array_values(
+            array_filter(
+                $this->alterTables,
+                static fn($t) => !isset($set[$t->tableName]),
+            ),
+        );
+
+        $this->dropTables = array_values(
+            array_filter(
+                $this->dropTables,
+                static fn($t) => !isset($set[$t]),
+            ),
+        );
+    }
 }
