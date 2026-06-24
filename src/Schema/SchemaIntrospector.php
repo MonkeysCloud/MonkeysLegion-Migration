@@ -52,7 +52,12 @@ final class SchemaIntrospector
 
         $schema = [];
         foreach ($tables as $tableName) {
-            $schema[$tableName] = $this->introspectTable($tableName);
+            try {
+                $schema[$tableName] = $this->introspectTable($tableName);
+            } catch (\Throwable $e) {
+                // Skip tables that cannot be introspected (e.g. exotic partition types)
+                error_log("[SchemaIntrospector] Skipping table '{$tableName}': {$e->getMessage()}");
+            }
         }
 
         $this->schemaCache = $schema;
@@ -138,8 +143,19 @@ final class SchemaIntrospector
         $schemaStmt = $pdo->query('SELECT current_schema()');
         $pgSchema   = $schemaStmt ? ($schemaStmt->fetchColumn() ?: 'public') : 'public';
 
+        // Exclude partition children: any table that inherits from another
+        // via pg_inherits is a partition child and should not be introspected
+        // independently — the parent partitioned table is sufficient.
         $stmt = $pdo->prepare(
-            'SELECT tablename FROM pg_tables WHERE schemaname = :schema',
+            'SELECT c.relname AS tablename
+               FROM pg_class c
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+              WHERE n.nspname = :schema
+                AND c.relkind IN (\'r\', \'p\')
+                AND NOT EXISTS (
+                    SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid
+                )
+              ORDER BY c.relname',
         );
         $stmt->execute(['schema' => $pgSchema]);
 
@@ -492,8 +508,14 @@ final class SchemaIntrospector
                AND tc.table_name = :table
         SQL;
 
-        $stmt = $pdo->prepare($sql);
-        $stmt->execute(['table' => $table]);
+        try {
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute(['table' => $table]);
+        } catch (\PDOException $e) {
+            // Some table types (partitions, foreign tables) may fail FK introspection
+            error_log("[SchemaIntrospector] FK introspection failed for '{$table}': {$e->getMessage()}");
+            return [];
+        }
 
         $fks = [];
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
